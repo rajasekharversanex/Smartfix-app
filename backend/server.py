@@ -139,6 +139,15 @@ def require_roles(*allowed):
     return dep
 
 
+# Scoped convenience wrappers used across the app so a new role picked up in
+# permissions_for() is automatically allowed on the right endpoints.
+def require_admin():   return require_roles(*ADMIN_ROLES)
+def require_ops():     return require_roles(*OPS_ROLES)
+def require_support(): return require_roles(*SUPPORT_ROLES)
+def require_finance(): return require_roles(*FINANCE_ROLES)
+def require_backoffice(): return require_roles(*BACKOFFICE_ROLES)
+
+
 # ---------- email helper (Resend via Emergent proxy) ----------
 async def send_reset_email(to: str, name: str, reset_link: str):
     if not EMAIL_KEY:
@@ -175,7 +184,47 @@ async def send_reset_email(to: str, name: str, reset_link: str):
 
 # ---------- pydantic models ----------
 class Role(str, Enum):
-    OWNER = "OWNER"; ADMIN = "ADMIN"; STAFF = "STAFF"; PROVIDER = "PROVIDER"; CUSTOMER = "CUSTOMER"
+    OWNER = "OWNER"; ADMIN = "ADMIN"; STAFF = "STAFF"
+    SUPERVISOR = "SUPERVISOR"; OPERATIONS = "OPERATIONS"
+    SUPPORT = "SUPPORT"; FINANCE = "FINANCE"
+    VENDOR = "VENDOR"; TECHNICIAN = "TECHNICIAN"
+    PROVIDER = "PROVIDER"   # legacy: individual field technician
+    CUSTOMER = "CUSTOMER"
+
+
+# Scope groups for authorisation. Roles that satisfy a scope share the same
+# access checks so future operational/support/finance users work without
+# touching every endpoint.
+ADMIN_ROLES     = ("OWNER", "ADMIN")
+OPS_ROLES       = ("OWNER", "ADMIN", "STAFF", "SUPERVISOR", "OPERATIONS")
+SUPPORT_ROLES   = ("OWNER", "ADMIN", "STAFF", "SUPPORT")
+FINANCE_ROLES   = ("OWNER", "ADMIN", "STAFF", "FINANCE")
+# Union of everyone who can see the /admin control center (any back-office role).
+BACKOFFICE_ROLES = tuple(sorted(set(ADMIN_ROLES + OPS_ROLES + SUPPORT_ROLES + FINANCE_ROLES)))
+# Roles that can actually deliver a job on the ground.
+FIELD_ROLES = ("PROVIDER", "TECHNICIAN")
+
+
+# Fine-grained permission map exposed via /api/auth/permissions so the
+# frontend can gate UI without hard-coding role strings.
+def permissions_for(role: str) -> dict:
+    return {
+        "backoffice": role in BACKOFFICE_ROLES,
+        "admin": role in ADMIN_ROLES,
+        "ops": role in OPS_ROLES,
+        "support": role in SUPPORT_ROLES,
+        "finance": role in FINANCE_ROLES,
+        "field": role in FIELD_ROLES,
+        "manage_services": role in ADMIN_ROLES,
+        "manage_categories": role in ADMIN_ROLES,
+        "manage_coupons": role in ADMIN_ROLES,
+        "manage_users": role in ADMIN_ROLES,
+        "manage_providers": role in ADMIN_ROLES,
+        "assign_jobs": role in OPS_ROLES,
+        "verify_payment": role in FINANCE_ROLES,
+        "view_stats": role in BACKOFFICE_ROLES,
+        "view_all_bookings": role in BACKOFFICE_ROLES,
+    }
 
 
 class RequestOtpIn(BaseModel):
@@ -455,6 +504,16 @@ async def me(u=Depends(current_user)):
     return u
 
 
+@api.get("/auth/permissions")
+async def my_permissions(u=Depends(current_user)):
+    """Fine-grained permission map for the current caller. The frontend can
+    key UI gates off this instead of hard-coding role strings, so new roles
+    (SUPERVISOR/OPERATIONS/SUPPORT/FINANCE/TECHNICIAN/VENDOR) work
+    automatically."""
+    return {"role": u["role"], "vendor_id": u.get("vendor_id"),
+            "permissions": permissions_for(u["role"])}
+
+
 @api.post("/auth/forgot-password")
 async def forgot(x: ForgotIn):
     i = norm_login(x.identifier)
@@ -516,7 +575,7 @@ async def list_categories():
 
 
 @api.post("/admin/categories")
-async def create_category(x: CategoryIn, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def create_category(x: CategoryIn, u=Depends(require_admin())):
     doc = {"id": uid(), **x.dict(), "created_at": now_utc()}
     await categories_c.insert_one(doc)
     doc.pop("_id", None)
@@ -524,13 +583,13 @@ async def create_category(x: CategoryIn, u=Depends(require_roles("OWNER", "ADMIN
 
 
 @api.patch("/admin/categories/{cid}")
-async def update_category(cid: str, x: CategoryIn, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def update_category(cid: str, x: CategoryIn, u=Depends(require_admin())):
     await categories_c.update_one({"id": cid}, {"$set": x.dict()})
     return await categories_c.find_one({"id": cid}, {"_id": 0})
 
 
 @api.delete("/admin/categories/{cid}")
-async def delete_category(cid: str, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def delete_category(cid: str, u=Depends(require_admin())):
     await categories_c.delete_one({"id": cid})
     return {"ok": True}
 
@@ -554,7 +613,7 @@ async def get_service(sid: str):
 
 
 @api.post("/admin/services")
-async def create_service(x: ServiceIn, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def create_service(x: ServiceIn, u=Depends(require_admin())):
     cat = await categories_c.find_one({"id": x.category_id}, {"_id": 0})
     if not cat: raise HTTPException(400, "Invalid category")
     doc = {"id": uid(), **x.dict(), "category_name": cat["name"], "rating": 5.0, "bookings_count": 0, "created_at": now_utc()}
@@ -564,7 +623,7 @@ async def create_service(x: ServiceIn, u=Depends(require_roles("OWNER", "ADMIN")
 
 
 @api.patch("/admin/services/{sid}")
-async def update_service(sid: str, x: ServiceIn, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def update_service(sid: str, x: ServiceIn, u=Depends(require_admin())):
     cat = await categories_c.find_one({"id": x.category_id}, {"_id": 0})
     if not cat: raise HTTPException(400, "Invalid category")
     await services_c.update_one({"id": sid}, {"$set": {**x.dict(), "category_name": cat["name"]}})
@@ -572,7 +631,7 @@ async def update_service(sid: str, x: ServiceIn, u=Depends(require_roles("OWNER"
 
 
 @api.delete("/admin/services/{sid}")
-async def delete_service(sid: str, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def delete_service(sid: str, u=Depends(require_admin())):
     await services_c.delete_one({"id": sid})
     return {"ok": True}
 
@@ -634,7 +693,7 @@ async def validate_coupon(code: str, amount: float):
 
 
 @api.post("/admin/coupons")
-async def create_coupon(x: CouponIn, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def create_coupon(x: CouponIn, u=Depends(require_admin())):
     doc = {"id": uid(), **x.dict(), "code": x.code.upper(), "created_at": now_utc()}
     try:
         await coupons_c.insert_one(doc)
@@ -645,7 +704,7 @@ async def create_coupon(x: CouponIn, u=Depends(require_roles("OWNER", "ADMIN")))
 
 
 @api.delete("/admin/coupons/{cid}")
-async def delete_coupon(cid: str, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def delete_coupon(cid: str, u=Depends(require_admin())):
     await coupons_c.delete_one({"id": cid})
     return {"ok": True}
 
@@ -703,11 +762,14 @@ async def create_booking(x: BookingIn, u=Depends(current_user)):
 
 @api.get("/bookings")
 async def list_my_bookings(status_filter: Optional[str] = Query(None, alias="status"), u=Depends(current_user)):
-    if u["role"] == "PROVIDER":
+    if u["role"] in FIELD_ROLES:                       # PROVIDER / TECHNICIAN see their own assigned jobs
         q = {"provider_id": u["id"]}
-    elif u["role"] in ("OWNER", "ADMIN", "STAFF"):
+    elif u["role"] == "VENDOR":                        # VENDOR sees every job assigned to any of their technicians
+        team = await users.find({"vendor_id": u["id"]}, {"_id": 0, "id": 1}).to_list(500)
+        q = {"provider_id": {"$in": [t["id"] for t in team]}}
+    elif u["role"] in BACKOFFICE_ROLES:                # back-office roles see every booking
         q = {}
-    else:
+    else:                                              # CUSTOMER (default) → own only
         q = {"customer_id": u["id"]}
     if status_filter:
         q["status"] = status_filter
@@ -721,8 +783,12 @@ async def get_booking(bid: str, u=Depends(current_user)):
     if not b: raise HTTPException(404, "Not found")
     if u["role"] == "CUSTOMER" and b["customer_id"] != u["id"]:
         raise HTTPException(403, "Forbidden")
-    if u["role"] == "PROVIDER" and b.get("provider_id") != u["id"]:
+    if u["role"] in FIELD_ROLES and b.get("provider_id") != u["id"]:
         raise HTTPException(403, "Forbidden")
+    if u["role"] == "VENDOR":
+        prov = await users.find_one({"id": b.get("provider_id")}, {"_id": 0, "vendor_id": 1}) if b.get("provider_id") else None
+        if not prov or prov.get("vendor_id") != u["id"]:
+            raise HTTPException(403, "Forbidden")
     return await enrich_booking(b)
 
 
@@ -730,15 +796,17 @@ async def get_booking(bid: str, u=Depends(current_user)):
 async def update_status(bid: str, x: BookingStatusIn, u=Depends(current_user)):
     b = await bookings_c.find_one({"id": bid})
     if not b: raise HTTPException(404, "Not found")
-    # authz: customer can cancel own; provider can set ACCEPTED..COMPLETED on own; admin all
+    # authz: customer can cancel own; provider/technician can advance own; ops-scope free
     if u["role"] == "CUSTOMER":
         if b["customer_id"] != u["id"] or x.status != "CANCELLED":
             raise HTTPException(403, "Only cancel your own booking")
-    elif u["role"] == "PROVIDER":
+    elif u["role"] in FIELD_ROLES:
         if b.get("provider_id") != u["id"]:
             raise HTTPException(403, "Not your job")
         if x.status not in ("ACCEPTED", "ON_THE_WAY", "IN_PROGRESS", "COMPLETED"):
             raise HTTPException(400, "Invalid provider status")
+    elif u["role"] not in OPS_ROLES:
+        raise HTTPException(403, "Forbidden")
     upd = {"status": x.status, "updated_at": now_utc()}
     if x.status == "COMPLETED" and b["payment_method"] == "CASH":
         upd["payment_status"] = "PAID"
@@ -747,9 +815,10 @@ async def update_status(bid: str, x: BookingStatusIn, u=Depends(current_user)):
 
 
 @api.post("/bookings/{bid}/assign")
-async def assign_provider(bid: str, x: AssignProviderIn, u=Depends(require_roles("OWNER", "ADMIN", "STAFF"))):
-    p = await users.find_one({"id": x.provider_id, "role": "PROVIDER"}, {"_id": 0})
-    if not p: raise HTTPException(400, "Invalid provider")
+async def assign_provider(bid: str, x: AssignProviderIn, u=Depends(require_ops())):
+    # Accept either a PROVIDER (legacy solo field-tech) or a TECHNICIAN.
+    p = await users.find_one({"id": x.provider_id, "role": {"$in": list(FIELD_ROLES)}}, {"_id": 0})
+    if not p: raise HTTPException(400, "Invalid provider/technician")
     await bookings_c.update_one({"id": bid}, {"$set": {"provider_id": p["id"], "provider_name": p.get("name"), "status": "ACCEPTED", "updated_at": now_utc()}})
     return await enrich_booking(await bookings_c.find_one({"id": bid}))
 
@@ -765,7 +834,7 @@ async def upi_confirm(bid: str, x: UpiConfirmIn, u=Depends(current_user)):
 
 
 @api.post("/admin/bookings/{bid}/verify-payment")
-async def verify_payment(bid: str, u=Depends(require_roles("OWNER", "ADMIN", "STAFF"))):
+async def verify_payment(bid: str, u=Depends(require_finance())):
     await bookings_c.update_one({"id": bid}, {"$set": {"payment_status": "PAID", "updated_at": now_utc()}})
     return await enrich_booking(await bookings_c.find_one({"id": bid}))
 
@@ -805,7 +874,7 @@ async def provider_apply(x: ProviderApplyIn, u=Depends(current_user)):
 
 
 @api.get("/admin/providers/applications")
-async def list_applications(u=Depends(require_roles("OWNER", "ADMIN"))):
+async def list_applications(u=Depends(require_admin())):
     apps = await providers_c.find({"status": "PENDING"}, {"_id": 0}).to_list(100)
     for a in apps:
         usr = await users.find_one({"id": a["user_id"]}, {"_id": 0, "name": 1, "mobile": 1, "email": 1})
@@ -814,7 +883,7 @@ async def list_applications(u=Depends(require_roles("OWNER", "ADMIN"))):
 
 
 @api.post("/admin/providers/{aid}/approve")
-async def approve_provider(aid: str, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def approve_provider(aid: str, u=Depends(require_admin())):
     a = await providers_c.find_one({"id": aid})
     if not a: raise HTTPException(404, "Not found")
     await providers_c.update_one({"id": aid}, {"$set": {"status": "APPROVED"}})
@@ -823,7 +892,7 @@ async def approve_provider(aid: str, u=Depends(require_roles("OWNER", "ADMIN")))
 
 
 @api.get("/admin/providers")
-async def list_providers(u=Depends(require_roles("OWNER", "ADMIN", "STAFF"))):
+async def list_providers(u=Depends(require_ops())):
     rows = await users.find({"role": "PROVIDER"}, {"_id": 0, "password_hash": 0}).to_list(500)
     return rows
 
@@ -832,7 +901,7 @@ async def list_providers(u=Depends(require_roles("OWNER", "ADMIN", "STAFF"))):
 # ADMIN DASHBOARD
 # =========================================================
 @api.get("/admin/stats")
-async def admin_stats(u=Depends(require_roles("OWNER", "ADMIN", "STAFF"))):
+async def admin_stats(u=Depends(require_backoffice())):
     today_start = datetime.combine(now_utc().date(), datetime.min.time())
     total_customers = await users.count_documents({"role": "CUSTOMER"})
     total_providers = await users.count_documents({"role": "PROVIDER"})
@@ -859,7 +928,7 @@ async def admin_stats(u=Depends(require_roles("OWNER", "ADMIN", "STAFF"))):
 
 
 @api.get("/admin/users")
-async def admin_list_users(role: Optional[str] = None, u=Depends(require_roles("OWNER", "ADMIN"))):
+async def admin_list_users(role: Optional[str] = None, u=Depends(require_admin())):
     q = {}
     if role: q["role"] = role
     return await users.find(q, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(500)

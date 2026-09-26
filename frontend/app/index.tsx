@@ -18,9 +18,12 @@ export default function Index() {
     );
   }
   if (!user) return <Redirect href="/login" />;
-  if (user.role === "OWNER" || user.role === "ADMIN" || user.role === "STAFF")
-    return <Redirect href="/admin" />;
-  if (user.role === "PROVIDER") return <Redirect href="/provider" />;
+  // Back-office roles land on the admin control center; field roles on the
+  // technician dashboard; everyone else is a customer.
+  const BACKOFFICE = ["OWNER", "ADMIN", "STAFF", "SUPERVISOR", "OPERATIONS", "SUPPORT", "FINANCE"];
+  const FIELD = ["PROVIDER", "TECHNICIAN"];
+  if (BACKOFFICE.includes(user.role)) return <Redirect href="/admin" />;
+  if (FIELD.includes(user.role)) return <Redirect href="/provider" />;
   return <Redirect href="/home" />;
 }
 const styles = StyleSheet.create({ center: { flex: 1, alignItems: "center", justifyContent: "center" } });

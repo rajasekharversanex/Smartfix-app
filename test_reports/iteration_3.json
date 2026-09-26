@@ -1,0 +1,40 @@
+{
+  "summary": "SmartFix Services role/access-control audit retest. BACKEND: full existing regression /app/backend/tests/backend_test.py = 35/35 PASSED. NEW /app/backend/tests/test_roles_audit.py = 31/31 PASSED covering (a) GET /api/auth/permissions per-role map — verified OWNER admin/ops/support/finance/backoffice=true & field=false; CUSTOMER all false; SUPERVISOR & OPERATIONS ops/backoffice/view_stats=true, admin/manage_services=false; SUPPORT support/backoffice=true, ops/admin=false; FINANCE finance/backoffice/verify_payment=true, admin=false; VENDOR backoffice/field=false; TECHNICIAN field=true, backoffice=false. NB: endpoint returns {role, vendor_id, permissions:{...}} — permission booleans are nested under 'permissions'. (b) Scope matrix — supervisor1/ops1 stats & bookings 200, services/coupons POST 403; support1 stats/bookings 200 but assign & verify-payment 403; finance1 verify-payment 200, services/assign 403; vendor1/tech1 stats 403. (c) Vendor scoping — after ops1 assigns tech1 to a customer1 booking, vendor1 GET /api/bookings includes it, GET /api/bookings/{id} = 200, but GET on an unassigned booking = 403. (d) Technician lifecycle — tech1 sees assigned job, PATCH status through ACCEPTED→ON_THE_WAY→IN_PROGRESS→COMPLETED all 200 and CASH payment auto-moved to PAID on COMPLETED; PATCH on someone else's booking = 403. (e) Data isolation — freshly-registered customer sees [] addresses and [] bookings. (f) Owner still creates services & coupons (200). FRONTEND regressions on mobile viewport 390x844: owner/Owner@12345 → /admin ✅; customer1/Pass@123 → /home tabs ✅; tap AC General Service → Book Now → Confirm-Booking screen shows both saved addresses with the current default (Office, from iter_2 seed) pre-selected with green DEFAULT badge, and 'Flat 402, Sunrise Towers, Mumbai - 400001' visible below — no regression. No new UI was added for the new roles (per spec).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/permissions", "issue": "Response shape is {role, vendor_id, permissions:{...}}. Consider documenting so future frontend hooks read the nested 'permissions' object."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_roles_audit.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/pytest_roles.xml"
+  ],
+  "action_items": [
+    "None blocking. Optional: document the {role, vendor_id, permissions:{...}} shape of /api/auth/permissions in README/API docs so the eventual UI hook reads perms.permissions.<flag>.",
+    "Still open from iter_2: strip dev_otp & reset_token from responses before production and wire real SMS provider."
+  ],
+  "critical_code_review_comments": [
+    "Role scope refactor is clean: assign endpoint accepts PROVIDER or TECHNICIAN, and VENDOR is properly scoped via users.vendor_id when listing / fetching bookings (verified end-to-end: vendor1 sees only tech1's bookings and 403 on unassigned).",
+    "Auto-mark CASH payment=PAID on COMPLETED via technician is working — confirmed on booking id returned by test_tech_status_progression.",
+    "Frontend index.tsx redirect correctly routes owner/back-office roles to /admin and customer to /home; new SUPERVISOR/OPERATIONS/SUPPORT/FINANCE roles will also land on /admin (not UI-tested per spec).",
+    "GET /api/auth/permissions returns nested {permissions:{...}} which is a fine shape but was not stated in the request; recommend flagging in the response contract when the frontend UI hook is added."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_roles_audit.py (NEW)"
+  ],
+  "success_rate": {"backend": "100% (66/66: 35 regression + 31 role audit)", "frontend": "100% on 3 regression flows (owner redirect, customer redirect, address preselect on Book screen)"},
+  "seed_data_creation": "Role-audit test session created: 1 assigned CASH booking (customer1 → tech1, progressed all the way to COMPLETED/PAID), 1 UPI booking verified PAID by finance1, plus 2 unassigned bookings for negative tests. All persist in DB for regression reruns.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Public URL https://smartfix-pro-4.preview.emergentagent.com. Seeded accounts (all Pass@123 unless noted): owner/Owner@12345, customer1, supervisor1, ops1, support1, finance1, vendor1 (owns tech1), tech1. Dev OTP 123456. /api/auth/permissions returns {role, vendor_id, permissions:{admin,ops,support,finance,backoffice,field,view_stats,manage_services,verify_payment,...}}. Run: pytest /app/backend/tests/ -v (66 tests total, ~10s). Frontend login button label is 'Log In' (not 'Login'/'Sign In').",
+  "rca_of_issue": "N/A — this iteration is a green regression pass for the role audit implementation. The only test-level miss was that my initial permission assertions read the top-level dict; the API nests booleans under a 'permissions' key. Fixed inside the test file, no server change needed."
+}
