@@ -1,0 +1,45 @@
+{
+  "summary": "SmartFix full-platform (quotations + tickets + finance + audit + role mgmt + notifications) — backend & frontend tested end-to-end. BACKEND: 99/99 pytest pass (35 legacy regression + 31 role/audit + 33 NEW platform tests). One 500 was found & fixed on PATCH /api/admin/users/{uid}/role (Mongo _id ObjectId leaking into response) — root cause: `return {'user': {**target, ...}}` included raw mongo doc. Fixed by stripping _id/password_hash. FRONTEND: mobile viewport 390x844, all critical flows verified — (a) customer1 login → home → tap 'AC General Service' → Book Now → Confirm-booking screen shows both saved addresses with Office as DEFAULT (green pill) pre-selected, Home/Sunrise visible below → **default-address regression PASS**. (b) tech1 login → /provider dashboard shows 'My Jobs' with active/completed cards + earnings summary. (c) owner login → /admin with all 9 tabs rendered via testID admin-tab-{overview,bookings,services,providers,coupons,users,support,finance,audit}. Support tab shows 'Missed appointment' HIGH priority ticket with IN_PROGRESS pill and clickable status chips (OPEN/IN_PROGRESS/WAITING_CUSTOMER/RESOLVED/CLOSED). Finance tab shows KPI cards (Total Revenue ₹7235.5, Cash ₹2994, UPI ₹4241.5, Awaiting Verify ₹0, Pending ₹16126.1) + Ledger. Audit tab lists BOOKING_COMPLETED, TECHNICIAN_ASSIGNED, ROLE_CHANGED, BOOKING_CREATED entries. Users tab shows inline role dropdown pill per user. Quotation security & business logic verified via pytest: token = 43-char base64url from token_urlsafe(32), only sha256 hash stored, raw token returned ONLY to owning technician, hidden from customer/owner GETs; totals server-computed exactly (450 parts + 200 labour, tax 18% = 117 → total 767); public GET auto-marks VIEWED, second /respond returns 400 'already accepted'; random token → 404; SF-Q-YYYY-NNNN human number; wa.me link returned only when customer_phone set. Booking history chronological with changed_by_role=TECHNICIAN. Notifications for customer include BOOKING_CREATED, TECHNICIAN_ASSIGNED, QUOTATION_CREATED. Role change audited; customer1 forbidden 403. Permissions API shape {role, vendor_id, permissions:{...}} confirmed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PATCH /api/admin/users/{uid}/role", "issue": "Response returned raw MongoDB doc with ObjectId `_id`, causing 500 (ValueError: 'ObjectId' object is not iterable / vars() argument must have __dict__). FIXED in this iteration by stripping _id and password_hash before merging."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_roles_audit.py",
+    "/app/backend/tests/test_smartfix_platform.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/pytest_platform.xml"
+  ],
+  "action_items": [
+    "None blocking. Optional: audit other admin/user endpoints (change_user_role response was symptomatic) for the same pattern — spread raw Mongo docs into responses without stripping _id. Recommend a centralized `_safe_user()` helper mirroring `_safe_quotation()`.",
+    "Still open from prior iterations: strip dev_otp & reset_token from responses before prod; wire real SMS provider.",
+    "Consider documenting `PUBLIC_URL` env var requirement in README (used to build the /quote/<token> deep link)."
+  ],
+  "critical_code_review_comments": [
+    "Quotation security is well-implemented: secrets.token_urlsafe(32) + sha256 stored as token_hash, raw token returned only to owning tech, _safe_quotation() strips token_hash always and token unless owner-tech.",
+    "Server-side totals recomputation prevents client tampering — parts vs labour split, discount applied before tax, sane rounding.",
+    "Public /respond enforces sticky ACCEPTED/REJECTED/EXPIRED with clear 400 message; expiry auto-flip on read is idempotent.",
+    "audit_log writes on QUOTATION_CREATED/SENT/ACCEPTED/REJECTED, TECHNICIAN_ASSIGNED, TICKET_CREATED/UPDATED, ROLE_CHANGED, PAYMENT_VERIFIED, all BOOKING_* transitions — full trail.",
+    "Bug: change_user_role returned raw target dict (with Mongo _id) — fixed. Same pattern risk in any endpoint doing `{**doc, ...}` on find_one() results.",
+    "Frontend admin.tsx uses testID `admin-tab-{tab}` (lowercase) with CSS textTransform capitalize — tabs render visually as 'Users', 'Support', etc. Any DOM-text assertion must use lowercase or the testID."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (fixed change_user_role response — strip _id + password_hash)",
+    "/app/backend/tests/test_smartfix_platform.py (NEW — 33 tests covering quotations, public flow, tickets, finance, role mgmt, audit, notifications, permissions shape)"
+  ],
+  "success_rate": {"backend": "100% (99/99)", "frontend": "100% on 5 spot-checked flows: customer default-address preselect, owner /admin all 9 tabs render, Support tab live data, Finance KPI+ledger, Audit trail with new actions, Users tab inline role pill, tech /provider dashboard load"},
+  "seed_data_creation": "Test session created: 2 quotations for customer1's booking (one ACCEPTED via public link, one REJECTED), 1 IN_PROGRESS HIGH-priority ticket, extra CASH+UPI bookings for finance sums, 1 throwaway user promoted to TECHNICIAN via owner role change. All persist in DB for regression reruns.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Public URL https://smartfix-pro-4.preview.emergentagent.com. Accounts (Pass@123 unless noted): owner/Owner@12345, customer1, supervisor1, ops1, support1, finance1, vendor1 (owns tech1), tech1. Dev OTP 123456. Backend runs pytest /app/backend/tests/ = 99 tests in ~20s. Frontend admin tabs use testID `admin-tab-{overview|bookings|services|providers|coupons|users|support|finance|audit}` — case matters (lowercase) though displayed capitalized via CSS. Login inputs are unlabeled testIDs — use inputs.nth(0/1) for identifier/password. Login button text is 'Log In'. Quotation public route: /quote/<raw_token> (frontend Expo route) — API is /api/public/quotations/<raw_token>. Raw token is only in GET /api/quotations/{id} response for the owning technician. PUBLIC_URL env in backend/.env drives the WhatsApp deep-link.",
+  "rca_of_issue": "Bug: PATCH /api/admin/users/{uid}/role → 500 ValueError. RCA: server.py:1311 returned `{'user': {**target, **upd, 'password_hash': None}}` where `target` was a raw find_one() result still carrying a MongoDB ObjectId `_id`. FastAPI's jsonable_encoder failed on ObjectId (not JSON-serializable / not __dict__-iterable). Repro: PATCH /api/admin/users/<any-uid>/role with body {'role':'TECHNICIAN'} as owner → 500. Mitigation applied: build a `safe_target = {k:v for k,v in target.items() if k not in ('_id','password_hash')}` then spread. Verified by re-running TestRoleMgmtAndAudit → 3/3 pass, then full suite → 99/99 pass."
+}

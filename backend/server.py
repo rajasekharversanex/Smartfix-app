@@ -45,6 +45,13 @@ bookings_c = db.bookings
 providers_c = db.providers
 coupons_c = db.coupons
 reviews_c = db.reviews
+quotations_c = db.quotations
+booking_history_c = db.booking_status_history
+tickets_c = db.support_tickets
+audit_c = db.audit_logs
+notifications_c = db.notifications
+amc_plans_c = db.amc_plans
+amc_subs_c = db.amc_subscriptions
 
 app = FastAPI(title="SmartFix API")
 api = APIRouter(prefix="/api")
@@ -757,6 +764,9 @@ async def create_booking(x: BookingIn, u=Depends(current_user)):
     }
     await bookings_c.insert_one(doc)
     await services_c.update_one({"id": x.service_id}, {"$inc": {"bookings_count": 1}})
+    await booking_history(doc["id"], None, "PENDING", u, "Booking created")
+    await audit_log(u, "BOOKING_CREATED", "booking", doc["id"], None, {"total": total})
+    await notify(u["id"], "BOOKING_CREATED", ["IN_APP"], {"booking_id": doc["id"], "total": total})
     return await enrich_booking(doc)
 
 
@@ -811,6 +821,8 @@ async def update_status(bid: str, x: BookingStatusIn, u=Depends(current_user)):
     if x.status == "COMPLETED" and b["payment_method"] == "CASH":
         upd["payment_status"] = "PAID"
     await bookings_c.update_one({"id": bid}, {"$set": upd})
+    await booking_history(bid, b.get("status"), x.status, u)
+    await audit_log(u, f"BOOKING_{x.status}", "booking", bid, b.get("status"), x.status)
     return await enrich_booking(await bookings_c.find_one({"id": bid}))
 
 
@@ -819,7 +831,13 @@ async def assign_provider(bid: str, x: AssignProviderIn, u=Depends(require_ops()
     # Accept either a PROVIDER (legacy solo field-tech) or a TECHNICIAN.
     p = await users.find_one({"id": x.provider_id, "role": {"$in": list(FIELD_ROLES)}}, {"_id": 0})
     if not p: raise HTTPException(400, "Invalid provider/technician")
+    b = await bookings_c.find_one({"id": bid})
+    if not b: raise HTTPException(404, "Not found")
     await bookings_c.update_one({"id": bid}, {"$set": {"provider_id": p["id"], "provider_name": p.get("name"), "status": "ACCEPTED", "updated_at": now_utc()}})
+    await booking_history(bid, b.get("status"), "ACCEPTED", u, f"Assigned to {p.get('name')}")
+    await audit_log(u, "TECHNICIAN_ASSIGNED", "booking", bid, b.get("provider_id"), p["id"])
+    await notify(p["id"], "TECHNICIAN_ASSIGNED", ["IN_APP"], {"booking_id": bid})
+    await notify(b["customer_id"], "TECHNICIAN_ASSIGNED", ["IN_APP"], {"booking_id": bid, "provider_name": p.get("name")})
     return await enrich_booking(await bookings_c.find_one({"id": bid}))
 
 
@@ -835,7 +853,11 @@ async def upi_confirm(bid: str, x: UpiConfirmIn, u=Depends(current_user)):
 
 @api.post("/admin/bookings/{bid}/verify-payment")
 async def verify_payment(bid: str, u=Depends(require_finance())):
+    b = await bookings_c.find_one({"id": bid})
+    if not b: raise HTTPException(404, "Not found")
     await bookings_c.update_one({"id": bid}, {"$set": {"payment_status": "PAID", "updated_at": now_utc()}})
+    await audit_log(u, "PAYMENT_VERIFIED", "booking", bid, b.get("payment_status"), "PAID",
+                    {"amount": b.get("total"), "method": b.get("payment_method")})
     return await enrich_booking(await bookings_c.find_one({"id": bid}))
 
 
@@ -932,6 +954,453 @@ async def admin_list_users(role: Optional[str] = None, u=Depends(require_admin()
     q = {}
     if role: q["role"] = role
     return await users.find(q, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(500)
+
+
+# =========================================================
+# AUDIT LOG + NOTIFICATION HELPERS
+# =========================================================
+# Every important state change goes through audit_log(...) so we can build
+# a "who did what and when" trail without changing every business endpoint.
+async def audit_log(actor: dict, action: str, entity_type: str, entity_id: str,
+                    previous_value=None, new_value=None, meta: Optional[dict] = None):
+    await audit_c.insert_one({
+        "id": uid(), "actor_user_id": actor["id"], "actor_role": actor["role"],
+        "action": action, "entity_type": entity_type, "entity_id": entity_id,
+        "previous_value": previous_value, "new_value": new_value,
+        "meta": meta or {}, "timestamp": now_utc(),
+    })
+
+
+# Channel-agnostic notification writer. External providers (WhatsApp Business
+# API, Firebase Cloud Messaging, MSG91 SMS, Resend email) plug in later by
+# reading rows from this collection; the app still functions without them.
+async def notify(user_id: Optional[str], event: str, channels: list, payload: dict):
+    await notifications_c.insert_one({
+        "id": uid(), "user_id": user_id, "event": event, "channels": channels,
+        "payload": payload, "status": "QUEUED", "created_at": now_utc(),
+    })
+
+
+# Booking status transitions get their own history row for the timeline UI.
+async def booking_history(bid: str, old_status: Optional[str], new_status: str,
+                          actor: dict, notes: Optional[str] = None):
+    await booking_history_c.insert_one({
+        "id": uid(), "booking_id": bid, "old_status": old_status,
+        "new_status": new_status, "changed_by_user_id": actor["id"],
+        "changed_by_role": actor["role"], "notes": notes or "",
+        "timestamp": now_utc(),
+    })
+
+
+# =========================================================
+# QUOTATIONS (technician → customer via secure public token)
+# =========================================================
+class QuotationItem(BaseModel):
+    description: str = Field(min_length=1, max_length=200)
+    qty: float = Field(gt=0)
+    unit_price: float = Field(ge=0)
+    kind: Literal["LABOUR", "PART", "OTHER"] = "PART"
+
+
+class QuotationIn(BaseModel):
+    booking_id: str
+    service_description: str = Field(min_length=1, max_length=500)
+    items: List[QuotationItem]
+    labour_charge: float = Field(ge=0, default=0)
+    tax_percent: float = Field(ge=0, le=50, default=18)
+    discount: float = Field(ge=0, default=0)
+    valid_days: int = Field(ge=1, le=30, default=3)
+    technician_notes: Optional[str] = None
+
+
+def _quotation_totals(items: List[QuotationItem], labour: float, tax_percent: float, discount: float):
+    parts = round(sum(i.qty * i.unit_price for i in items if i.kind != "LABOUR"), 2)
+    labour_from_items = round(sum(i.qty * i.unit_price for i in items if i.kind == "LABOUR"), 2)
+    labour_total = round(labour + labour_from_items, 2)
+    subtotal = round(parts + labour_total - discount, 2)
+    if subtotal < 0: subtotal = 0
+    tax = round(subtotal * (tax_percent / 100), 2)
+    total = round(subtotal + tax, 2)
+    return parts, labour_total, subtotal, tax, total
+
+
+async def _next_quotation_no() -> str:
+    # Human-friendly quotation number, e.g. SF-Q-2026-0001. Not the security
+    # token; token stays cryptographic.
+    year = now_utc().year
+    count = await quotations_c.count_documents({"quotation_no": {"$regex": f"^SF-Q-{year}-"}})
+    return f"SF-Q-{year}-{count + 1:04d}"
+
+
+@api.post("/quotations")
+async def create_quotation(x: QuotationIn, u=Depends(current_user)):
+    if u["role"] not in FIELD_ROLES:
+        raise HTTPException(403, "Only field roles can create quotations")
+    b = await bookings_c.find_one({"id": x.booking_id})
+    if not b: raise HTTPException(404, "Booking not found")
+    if b.get("provider_id") != u["id"]:
+        raise HTTPException(403, "Not your booking")
+    parts_total, labour_total, subtotal, tax, total = _quotation_totals(
+        x.items, x.labour_charge, x.tax_percent, x.discount)
+    token = secrets.token_urlsafe(32)
+    doc = {
+        "id": uid(), "quotation_no": await _next_quotation_no(),
+        "token": token, "token_hash": digest(token),
+        "booking_id": b["id"], "customer_id": b["customer_id"],
+        "customer_name": b.get("customer_name") or "",
+        "customer_phone": b.get("customer_mobile") or "",
+        "technician_id": u["id"], "technician_name": u.get("name") or "",
+        "service_description": x.service_description,
+        "items": [i.dict() for i in x.items],
+        "labour_charge": labour_total, "parts_charge": parts_total,
+        "tax_percent": x.tax_percent, "tax": tax,
+        "discount": x.discount, "subtotal": subtotal, "total": total,
+        "technician_notes": x.technician_notes or "",
+        "status": "DRAFT",
+        "valid_until": now_utc() + timedelta(days=x.valid_days),
+        "created_at": now_utc(), "updated_at": now_utc(),
+        "sent_at": None, "viewed_at": None, "responded_at": None,
+    }
+    await quotations_c.insert_one(doc)
+    doc.pop("_id", None)
+    await audit_log(u, "QUOTATION_CREATED", "quotation", doc["id"], None, {"total": total})
+    await notify(b["customer_id"], "QUOTATION_CREATED", ["IN_APP"],
+                 {"quotation_id": doc["id"], "total": total})
+    return _safe_quotation(doc)
+
+
+def _safe_quotation(doc: dict, include_token: bool = False) -> dict:
+    d = {k: v for k, v in doc.items() if k not in ("token_hash", "_id")}
+    if not include_token:
+        d.pop("token", None)
+    return d
+
+
+@api.get("/quotations")
+async def list_quotations(u=Depends(current_user)):
+    if u["role"] in FIELD_ROLES:
+        q = {"technician_id": u["id"]}
+    elif u["role"] == "CUSTOMER":
+        q = {"customer_id": u["id"], "status": {"$ne": "DRAFT"}}
+    elif u["role"] == "VENDOR":
+        team = await users.find({"vendor_id": u["id"]}, {"_id": 0, "id": 1}).to_list(500)
+        q = {"technician_id": {"$in": [t["id"] for t in team]}}
+    elif u["role"] in BACKOFFICE_ROLES:
+        q = {}
+    else:
+        q = {"customer_id": u["id"]}
+    rows = await quotations_c.find(q).sort("created_at", -1).to_list(200)
+    return [_safe_quotation(r) for r in rows]
+
+
+@api.get("/quotations/{qid}")
+async def get_quotation(qid: str, u=Depends(current_user)):
+    q = await quotations_c.find_one({"id": qid})
+    if not q: raise HTTPException(404, "Not found")
+    if u["role"] == "CUSTOMER" and q["customer_id"] != u["id"]:
+        raise HTTPException(403, "Forbidden")
+    if u["role"] in FIELD_ROLES and q["technician_id"] != u["id"]:
+        raise HTTPException(403, "Forbidden")
+    if u["role"] == "VENDOR":
+        tech = await users.find_one({"id": q["technician_id"]}, {"_id": 0, "vendor_id": 1})
+        if not tech or tech.get("vendor_id") != u["id"]:
+            raise HTTPException(403, "Forbidden")
+    # Technicians who own it can see the raw token (so they can copy the link)
+    return _safe_quotation(q, include_token=u["role"] in FIELD_ROLES and q["technician_id"] == u["id"])
+
+
+class QuotationSendIn(BaseModel):
+    channel: Literal["WHATSAPP", "SMS", "COPY"] = "WHATSAPP"
+
+
+@api.post("/quotations/{qid}/send")
+async def send_quotation(qid: str, x: QuotationSendIn, u=Depends(current_user)):
+    q = await quotations_c.find_one({"id": qid})
+    if not q: raise HTTPException(404, "Not found")
+    if u["role"] not in FIELD_ROLES or q["technician_id"] != u["id"]:
+        raise HTTPException(403, "Forbidden")
+    upd = {"status": "SENT" if q["status"] == "DRAFT" else q["status"], "sent_at": now_utc(), "updated_at": now_utc()}
+    await quotations_c.update_one({"id": qid}, {"$set": upd})
+    await audit_log(u, "QUOTATION_SENT", "quotation", qid, q["status"], upd["status"], {"channel": x.channel})
+    # Build the WhatsApp/SMS message + wa.me deep link. Real WhatsApp Business
+    # API sending is deferred; the technician can still tap the link.
+    public_url = (os.environ.get("PUBLIC_URL") or "").rstrip("/") + f"/quote/{q['token']}"
+    message = (
+        f"SmartFix Services\n"
+        f"Hello {q.get('customer_name') or 'Customer'},\n"
+        f"Your quotation for the additional work is ready.\n\n"
+        f"Quotation No: {q['quotation_no']}\n"
+        f"Amount: \u20b9{q['total']}\n\n"
+        f"View and respond: {public_url}\n\n"
+        f"Regards,\nSmartFix Services"
+    )
+    phone = re.sub(r"\D", "", q.get("customer_phone") or "")
+    from urllib.parse import quote as _uq
+    wa_link = f"https://wa.me/{phone}?text={_uq(message)}" if phone else None
+    await notify(q["customer_id"], "QUOTATION_SENT", [x.channel, "IN_APP"],
+                 {"quotation_id": qid, "url": public_url, "message": message})
+    return {"ok": True, "public_url": public_url, "message": message, "wa_link": wa_link}
+
+
+# --------- PUBLIC quotation endpoints (no login, token in URL) ---------
+@api.get("/public/quotations/{token}")
+async def public_view_quotation(token: str):
+    q = await quotations_c.find_one({"token_hash": digest(token)})
+    if not q: raise HTTPException(404, "Quotation not found")
+    if q["valid_until"] < now_utc() and q["status"] not in ("ACCEPTED", "REJECTED"):
+        await quotations_c.update_one({"id": q["id"]}, {"$set": {"status": "EXPIRED"}})
+        q["status"] = "EXPIRED"
+    # Auto-mark VIEWED on the first read (but keep ACCEPTED/REJECTED sticky).
+    if q["status"] == "SENT":
+        await quotations_c.update_one({"id": q["id"]}, {"$set": {"status": "VIEWED", "viewed_at": now_utc()}})
+        q["status"] = "VIEWED"
+    return _safe_quotation(q)
+
+
+class QuotationDecisionIn(BaseModel):
+    decision: Literal["ACCEPT", "REJECT", "CLARIFY"]
+    customer_notes: Optional[str] = None
+
+
+@api.post("/public/quotations/{token}/respond")
+async def public_respond_quotation(token: str, x: QuotationDecisionIn):
+    q = await quotations_c.find_one({"token_hash": digest(token)})
+    if not q: raise HTTPException(404, "Quotation not found")
+    if q["status"] in ("ACCEPTED", "REJECTED", "CANCELLED", "EXPIRED"):
+        raise HTTPException(400, f"Quotation already {q['status'].lower()}")
+    if q["valid_until"] < now_utc():
+        await quotations_c.update_one({"id": q["id"]}, {"$set": {"status": "EXPIRED"}})
+        raise HTTPException(400, "Quotation expired")
+    mapping = {"ACCEPT": "ACCEPTED", "REJECT": "REJECTED", "CLARIFY": "VIEWED"}
+    new_status = mapping[x.decision]
+    upd = {"status": new_status, "responded_at": now_utc(), "customer_notes": x.customer_notes or "", "updated_at": now_utc()}
+    await quotations_c.update_one({"id": q["id"]}, {"$set": upd})
+    # Synthetic actor because the customer is not authenticated on the public route.
+    actor = {"id": q["customer_id"], "role": "CUSTOMER"}
+    await audit_log(actor, f"QUOTATION_{new_status}", "quotation", q["id"], q["status"], new_status, {"via": "public_link"})
+    await notify(q["technician_id"], f"QUOTATION_{new_status}", ["IN_APP"], {"quotation_id": q["id"]})
+    return {"ok": True, "status": new_status}
+
+
+# =========================================================
+# BOOKING STATUS HISTORY (audit trail for the timeline UI)
+# =========================================================
+@api.get("/bookings/{bid}/history")
+async def booking_status_history(bid: str, u=Depends(current_user)):
+    b = await bookings_c.find_one({"id": bid})
+    if not b: raise HTTPException(404, "Not found")
+    if u["role"] == "CUSTOMER" and b["customer_id"] != u["id"]:
+        raise HTTPException(403, "Forbidden")
+    if u["role"] in FIELD_ROLES and b.get("provider_id") != u["id"]:
+        raise HTTPException(403, "Forbidden")
+    rows = await booking_history_c.find({"booking_id": bid}, {"_id": 0}).sort("timestamp", 1).to_list(100)
+    return rows
+
+
+# =========================================================
+# SUPPORT TICKETS
+# =========================================================
+class TicketIn(BaseModel):
+    booking_id: Optional[str] = None
+    subject: str = Field(min_length=3, max_length=120)
+    description: str = Field(min_length=3, max_length=2000)
+    priority: Literal["LOW", "NORMAL", "HIGH", "URGENT"] = "NORMAL"
+
+
+@api.post("/tickets")
+async def create_ticket(x: TicketIn, u=Depends(current_user)):
+    doc = {
+        "id": uid(), "customer_id": u["id"], "customer_name": u.get("name"),
+        "booking_id": x.booking_id, "subject": x.subject, "description": x.description,
+        "priority": x.priority, "status": "OPEN", "assigned_to": None,
+        "resolution": None, "created_at": now_utc(), "updated_at": now_utc(),
+    }
+    await tickets_c.insert_one(doc); doc.pop("_id", None)
+    await audit_log(u, "TICKET_CREATED", "ticket", doc["id"], None, {"priority": x.priority})
+    return doc
+
+
+@api.get("/tickets")
+async def list_tickets(u=Depends(current_user)):
+    if u["role"] in SUPPORT_ROLES:
+        q = {}
+    else:
+        q = {"customer_id": u["id"]}
+    return await tickets_c.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+
+class TicketUpdateIn(BaseModel):
+    status: Optional[Literal["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED", "CLOSED"]] = None
+    assigned_to: Optional[str] = None
+    resolution: Optional[str] = None
+    priority: Optional[Literal["LOW", "NORMAL", "HIGH", "URGENT"]] = None
+
+
+@api.patch("/tickets/{tid}")
+async def update_ticket(tid: str, x: TicketUpdateIn, u=Depends(require_support())):
+    t = await tickets_c.find_one({"id": tid})
+    if not t: raise HTTPException(404, "Not found")
+    upd = {k: v for k, v in x.dict().items() if v is not None}
+    if upd:
+        upd["updated_at"] = now_utc()
+        await tickets_c.update_one({"id": tid}, {"$set": upd})
+        await audit_log(u, "TICKET_UPDATED", "ticket", tid, {k: t.get(k) for k in upd}, upd)
+    return await tickets_c.find_one({"id": tid}, {"_id": 0})
+
+
+# =========================================================
+# VENDOR: manage own technicians
+# =========================================================
+@api.get("/vendor/technicians")
+async def vendor_technicians(u=Depends(require_roles("VENDOR", "OWNER", "ADMIN"))):
+    # Owner/Admin can also list technicians grouped by vendor for oversight.
+    if u["role"] == "VENDOR":
+        rows = await users.find({"vendor_id": u["id"], "role": "TECHNICIAN"},
+                                {"_id": 0, "password_hash": 0}).to_list(500)
+    else:
+        rows = await users.find({"role": "TECHNICIAN"},
+                                {"_id": 0, "password_hash": 0}).to_list(500)
+    return rows
+
+
+class LinkTechnicianIn(BaseModel):
+    user_id: str
+
+
+@api.post("/vendor/technicians/link")
+async def vendor_link_technician(x: LinkTechnicianIn, u=Depends(require_roles("VENDOR"))):
+    # A vendor "claims" an existing technician account into their team.
+    # Ownership transfer between vendors is intentionally forbidden.
+    target = await users.find_one({"id": x.user_id, "role": "TECHNICIAN"})
+    if not target: raise HTTPException(404, "Technician not found")
+    if target.get("vendor_id") and target["vendor_id"] != u["id"]:
+        raise HTTPException(403, "Technician already belongs to another vendor")
+    await users.update_one({"id": x.user_id}, {"$set": {"vendor_id": u["id"]}})
+    await audit_log(u, "TECHNICIAN_LINKED", "user", x.user_id, target.get("vendor_id"), u["id"])
+    return {"ok": True}
+
+
+# =========================================================
+# ADMIN: role management (audited)
+# =========================================================
+class RoleChangeIn(BaseModel):
+    role: Literal["CUSTOMER", "TECHNICIAN", "VENDOR", "PROVIDER", "SUPERVISOR",
+                  "OPERATIONS", "SUPPORT", "FINANCE", "STAFF", "ADMIN", "OWNER"]
+    vendor_id: Optional[str] = None
+
+
+@api.patch("/admin/users/{uid}/role")
+async def change_user_role(uid: str, x: RoleChangeIn, u=Depends(require_admin())):
+    target = await users.find_one({"id": uid})
+    if not target: raise HTTPException(404, "User not found")
+    # OWNER promotion is reserved to OWNER only.
+    if x.role == "OWNER" and u["role"] != "OWNER":
+        raise HTTPException(403, "Only OWNER can promote another user to OWNER")
+    if target["role"] == "OWNER" and u["role"] != "OWNER":
+        raise HTTPException(403, "Only OWNER can modify an OWNER account")
+    upd = {"role": x.role}
+    if x.role == "TECHNICIAN" and x.vendor_id:
+        v = await users.find_one({"id": x.vendor_id, "role": "VENDOR"})
+        if not v: raise HTTPException(400, "Invalid vendor_id")
+        upd["vendor_id"] = x.vendor_id
+    if x.role != "TECHNICIAN":
+        upd["vendor_id"] = None
+    await users.update_one({"id": uid}, {"$set": upd})
+    await audit_log(u, "ROLE_CHANGED", "user", uid,
+                    {"role": target["role"], "vendor_id": target.get("vendor_id")}, upd)
+    safe_target = {k: v for k, v in target.items() if k not in ("_id", "password_hash")}
+    return {"ok": True, "user": {**safe_target, **upd}}
+
+
+class UserStatusIn(BaseModel):
+    active: bool
+
+
+@api.patch("/admin/users/{uid}/status")
+async def toggle_user_status(uid: str, x: UserStatusIn, u=Depends(require_admin())):
+    target = await users.find_one({"id": uid})
+    if not target: raise HTTPException(404, "User not found")
+    if target["role"] == "OWNER":
+        raise HTTPException(403, "Cannot deactivate OWNER")
+    await users.update_one({"id": uid}, {"$set": {"active": x.active}})
+    await audit_log(u, "USER_STATUS_CHANGED", "user", uid, target.get("active", True), x.active)
+    return {"ok": True}
+
+
+# =========================================================
+# FINANCE
+# =========================================================
+@api.get("/finance/ledger")
+async def finance_ledger(u=Depends(require_finance())):
+    rows = await bookings_c.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    out = []
+    for r in rows:
+        out.append({
+            "booking_id": r["id"], "customer_name": r.get("customer_name"),
+            "provider_name": r.get("provider_name"),
+            "payment_method": r.get("payment_method"), "payment_status": r.get("payment_status"),
+            "total": r.get("total"), "upi_txn_ref": r.get("upi_txn_ref"),
+            "status": r.get("status"), "created_at": r.get("created_at"),
+        })
+    return out
+
+
+@api.get("/finance/summary")
+async def finance_summary(u=Depends(require_finance())):
+    async def sum_where(match: dict) -> float:
+        p = [{"$match": match}, {"$group": {"_id": None, "t": {"$sum": "$total"}}}]
+        r = await bookings_c.aggregate(p).to_list(1)
+        return round(r[0]["t"], 2) if r else 0.0
+    return {
+        "revenue_paid": await sum_where({"payment_status": "PAID"}),
+        "cash_paid":    await sum_where({"payment_status": "PAID", "payment_method": "CASH"}),
+        "upi_paid":     await sum_where({"payment_status": "PAID", "payment_method": "UPI"}),
+        "awaiting_verification": await sum_where({"payment_status": "AWAITING_VERIFICATION"}),
+        "pending":      await sum_where({"payment_status": "PENDING"}),
+    }
+
+
+# =========================================================
+# AUDIT LOG (read-only, admin scope)
+# =========================================================
+@api.get("/admin/audit")
+async def admin_audit(entity_type: Optional[str] = None, u=Depends(require_admin())):
+    q = {}
+    if entity_type: q["entity_type"] = entity_type
+    return await audit_c.find(q, {"_id": 0}).sort("timestamp", -1).to_list(200)
+
+
+# =========================================================
+# AMC (architecture only — no billing engine yet)
+# =========================================================
+class AmcPlanIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    price: float = Field(ge=0)
+    visits: int = Field(ge=1, le=52)
+    validity_days: int = Field(ge=30, le=1825)
+    service_ids: List[str] = []
+    description: Optional[str] = None
+
+
+@api.get("/amc/plans")
+async def list_amc_plans():
+    return await amc_plans_c.find({"active": {"$ne": False}}, {"_id": 0}).to_list(100)
+
+
+@api.post("/admin/amc/plans")
+async def create_amc_plan(x: AmcPlanIn, u=Depends(require_admin())):
+    doc = {"id": uid(), **x.dict(), "active": True, "created_at": now_utc()}
+    await amc_plans_c.insert_one(doc); doc.pop("_id", None)
+    await audit_log(u, "AMC_PLAN_CREATED", "amc_plan", doc["id"], None, doc)
+    return doc
+
+
+# =========================================================
+# NOTIFICATIONS (in-app inbox — real channels wire in later)
+# =========================================================
+@api.get("/notifications")
+async def my_notifications(u=Depends(current_user)):
+    return await notifications_c.find({"user_id": u["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
 
 
 # =========================================================

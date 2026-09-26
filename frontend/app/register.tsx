@@ -75,7 +75,7 @@ export default function Register() {
               <Input label="Mobile number" value={mobile} onChangeText={setMobile} placeholder="10-digit or +91XXXXXXXXXX" keyboardType="phone-pad" testID="register-mobile-input" />
               {err && <Text style={{ color: colors.error, marginBottom: spacing.md }}>{err}</Text>}
               <Button label="Send OTP" onPress={sendOtp} loading={loading} testID="register-send-otp-button" />
-              <Text style={{ color: colors.muted, marginTop: spacing.md, fontSize: 12 }}>We'll verify your mobile once. After this, no OTP is needed to log in.</Text>
+              <Text style={{ color: colors.muted, marginTop: spacing.md, fontSize: 12 }}>We&apos;ll verify your mobile once. After this, no OTP is needed to log in.</Text>
             </>
           )}
           {step === 2 && (

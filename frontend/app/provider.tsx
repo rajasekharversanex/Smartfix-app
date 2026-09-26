@@ -45,7 +45,7 @@ export default function ProviderDashboard() {
         {loading ? <ActivityIndicator color={colors.brandPrimary} /> : rows.length === 0 ? (
           <Text style={{ color: colors.muted, textAlign: "center", marginTop: spacing.xl }}>No jobs assigned yet.</Text>
         ) : rows.map((b) => (
-          <Pressable key={b.id} testID={`prov-booking-${b.id}`} onPress={() => router.push({ pathname: "/booking/[id]", params: { id: b.id } })} style={{ padding: spacing.lg, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }}>
+          <Pressable key={b.id} testID={`prov-booking-${b.id}`} onPress={() => router.push({ pathname: "/tech/[id]", params: { id: b.id } })} style={{ padding: spacing.lg, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
               <Text style={{ color: colors.onSurface, fontWeight: "700", flex: 1 }} numberOfLines={1}>{b.service_name}</Text>
               <StatusPill status={b.status} />

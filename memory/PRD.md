@@ -1,48 +1,37 @@
 # SmartFix Service — PRD
 
-**Brand**: SmartFix Services (by Versanex India) — official approved logo lives at `frontend/assets/brand/smartfix-logo.png`.
-**Type**: Doorstep home-services marketplace (Indian market)
+**Brand**: SmartFix Services (by Versanex India). Approved logo at `frontend/assets/brand/smartfix-logo.png`.
 
-## Roles
-OWNER, ADMIN, STAFF, PROVIDER, CUSTOMER — sharing one FastAPI + MongoDB backend and one Expo Router app.
+## Roles (enforced backend + frontend)
+CUSTOMER · TECHNICIAN · SUPERVISOR · OPERATIONS · SUPPORT · FINANCE · VENDOR · PROVIDER (legacy) · STAFF (legacy) · ADMIN · OWNER.
+Permissions map exposed at `GET /api/auth/permissions`.
 
-## Core User Flows
-- Register: mobile + one-time mock OTP (`123456`) → set name, username, email (optional), password.
-- Login: username / email / mobile + password (no OTP, no reCAPTCHA on normal login).
-- Forgot password: email reset link (Emergent-managed Resend) or mobile-OTP fallback.
-- Customer: browse categories/services → book (address auto-selected from saved default + slot + payment) → track status → pay UPI (deep link) or Cash → review.
-- Provider: apply → admin approval → accept assigned jobs → advance status → complete → view earnings.
-- Owner/Admin: KPI dashboard, bookings CRUD & provider assignment, services & categories CRUD, coupons CRUD, provider approvals, users list, UPI payment verification.
+## Core flows
+1. **Customer**: register (mobile OTP once, mock `123456`) → password login → browse services → pick address (auto-select default) → schedule → CASH or UPI deep-link → track status → review → contact support.
+2. **Ops / Supervisor**: dispatch board in `/admin` → assign TECHNICIAN to a booking. Assignment writes booking status history + audit log + queues notifications.
+3. **Technician** (`/provider` → tap job → `/tech/[id]`): view customer & address, advance status (Accept → On the way → Start → Complete), create additional-work quotation with items, send via WhatsApp deep-link (`wa.me/<phone>?text=...`).
+4. **No-app customer** (`/quote/<secure_token>`): open link in any browser, no login, see full quotation, Accept / Reject / Ask for clarification. Token = `secrets.token_urlsafe(32)`, only its SHA-256 is stored (`token_hash`); the raw token is only returned to the owning technician.
+5. **Support**: customers file tickets from Profile → Contact Support; SUPPORT / OWNER / ADMIN work them from Admin → Support.
+6. **Finance**: revenue KPIs + ledger + UPI verification button in Admin → Finance (FINANCE / OWNER / ADMIN).
+7. **Admin**: role management (change any user's role with audit log), coupons CRUD, services CRUD, provider applications, audit-log viewer.
 
 ## Payments
-- CASH only, or UPI via `upi://pay?...` deep-link into GPay/PhonePe/Paytm/BHIM. Customer submits transaction reference; admin verifies. No payment gateway fees.
+- Only **Cash** and **UPI**. UPI opens `upi://pay?pa=...&am=...` intent on Android/iOS; customer submits transaction ref; FINANCE/OWNER verifies → `payment_status = PAID`.
+- Cash bookings auto-mark PAID on `COMPLETED`.
+- Every payment/status change writes `booking_status_history` + `audit_logs`.
 
-## Branding
-- Official approved SmartFix Services logo is rendered on: Login, Register, Forgot Password, Home tab header (top-right), Profile footer, Admin header, initial splash/index. App icon + adaptive icon + splash + favicon use derived variants of the same logo.
-- Text lockup: "SmartFix Services" · "by Versanex India".
+## Data model (MongoDB)
+`users` (with optional `vendor_id`), `addresses`, `categories`, `services`, `coupons`, `bookings`, `booking_status_history`, `quotations` (token_hash, items, totals server-computed), `support_tickets`, `audit_logs`, `notifications`, `amc_plans`, `amc_subscriptions`, `reviews`, `providers` (applications), `auth_flows`, `password_resets`.
 
-## Notable Backend Endpoints (all under `/api`)
-- `POST /auth/register/request-otp` `/verify-otp` `/complete`
-- `POST /auth/login`, `GET /auth/me`, `POST /auth/forgot-password`, `POST /auth/reset-password`
-- `GET /categories`, `GET /services?category_id=&q=`, `GET /services/{id}`
-- `GET/POST/PATCH/DELETE /addresses` (user's first address is auto-marked default)
-- `GET /coupons`, `GET /coupons/validate?code=&amount=`
-- `POST /bookings`, `GET /bookings`, `GET /bookings/{id}`, `PATCH /bookings/{id}/status`, `POST /bookings/{id}/upi-confirm`
-- Admin: `/admin/services`, `/admin/categories`, `/admin/coupons`, `/admin/providers`, `/admin/bookings/{id}/verify-payment`, `/admin/stats`, `/admin/users`, `/bookings/{id}/assign`
+## Integrations
+- Emergent-managed Resend for password-reset emails.
+- Emergent LLM key configured but not used in flows yet.
+- WhatsApp: `wa.me` deep-link + queued row in `notifications`. Official WhatsApp Business API is a future config swap — no fake credentials.
+- SMS OTP: mocked (`123456`). Replace with MSG91 by reading `MSG91_AUTH_KEY` + `MSG91_TEMPLATE_ID` from env and calling their `/api/v5/otp` endpoint from `send_otp()` — code path already isolated.
 
-## Tech
-- Expo Router 57 + React 19 + React Native 0.86; expo-image, expo-secure-store, react-native-vector-icons/ionicons.
-- FastAPI + Motor (MongoDB), bcrypt, PyJWT (HS256, 7-day tokens), httpx for Resend proxy.
-- Emergent-managed Resend integration (`X-Email-Key` header) for password reset emails.
-- Env-driven only; no hardcoded secrets — GitHub / AWS export ready.
-
-## Recent Fixes (audit iteration_2)
-- Booking screen now reloads addresses on focus (`useFocusEffect`) and auto-selects the customer's default address.
-- Approved brand logo applied everywhere; "SF" text placeholder removed.
-- First-created address is auto-marked default on the backend so the booking flow never dead-ends.
-
-## Deferred / Future
-- Real SMS provider (MSG91/Twilio) — currently mock OTP `123456`.
-- Ratings/reviews UI on customer side (backend endpoint ready).
+## Not yet built (architecture-ready)
+- AMC subscription billing (plans CRUD in place).
+- Real WhatsApp Business API send.
 - Push notifications (only on native build after deploy).
-- Provider photo uploads (Emergent object storage) — backend hook ready to add.
+- Provider photo uploads (Emergent object storage hook).
+- Ratings/reviews UI (backend endpoint `POST /api/reviews` exists).

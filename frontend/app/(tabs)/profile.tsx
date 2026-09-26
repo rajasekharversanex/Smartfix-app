@@ -38,6 +38,7 @@ export default function Profile() {
 
         <Row icon="location-outline" label="My Addresses" onPress={() => router.push("/addresses")} testID="profile-addresses" />
         <Row icon="clipboard-outline" label="My Bookings" onPress={() => router.push("/(tabs)/bookings")} testID="profile-bookings" />
+        <Row icon="chatbubble-ellipses-outline" label="Contact Support" onPress={() => router.push("/support")} testID="profile-support" />
         <Row icon="briefcase-outline" label="Become a Provider" onPress={() => router.push("/provider-apply")} testID="profile-provider-apply" />
         <Row icon="lock-closed-outline" label="Reset Password" onPress={() => router.push("/forgot-password")} testID="profile-reset-password" />
 

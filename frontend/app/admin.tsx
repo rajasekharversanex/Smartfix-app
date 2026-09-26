@@ -8,7 +8,7 @@ import { useTheme, spacing, radius } from "@/src/theme";
 import { Button, Input, StatusPill } from "@/src/ui";
 import { Logo } from "@/src/brand";
 
-type Tab = "overview" | "bookings" | "services" | "providers" | "coupons" | "users";
+type Tab = "overview" | "bookings" | "services" | "providers" | "coupons" | "users" | "support" | "finance" | "audit";
 
 export default function Admin() {
   const { user, logout } = useAuth();
@@ -32,7 +32,7 @@ export default function Admin() {
           <Pressable onPress={async () => { await logout(); router.replace("/login"); }} testID="admin-logout"><Text style={{ color: colors.brandPrimary, fontWeight: "600" }}>Logout</Text></Pressable>
         </View>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.sm, paddingTop: spacing.md }}>
-          {(["overview", "bookings", "services", "providers", "coupons", "users"] as Tab[]).map((t) => (
+          {(["overview", "bookings", "services", "providers", "coupons", "users", "support", "finance", "audit"] as Tab[]).map((t) => (
             <Pressable key={t} testID={`admin-tab-${t}`} onPress={() => setTab(t)} style={{ flexShrink: 0, height: 36, paddingHorizontal: spacing.lg, borderRadius: radius.pill, backgroundColor: tab === t ? colors.brandPrimary : colors.surfaceTertiary, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: tab === t ? colors.brandPrimary : colors.border }}>
               <Text style={{ color: tab === t ? colors.onBrandPrimary : colors.onSurfaceTertiary, fontWeight: "600", fontSize: 13, textTransform: "capitalize" }}>{t}</Text>
             </Pressable>
@@ -46,6 +46,9 @@ export default function Admin() {
         {tab === "providers" && <ProvidersAdmin />}
         {tab === "coupons" && <CouponsAdmin />}
         {tab === "users" && <UsersAdmin />}
+        {tab === "support" && <SupportAdmin />}
+        {tab === "finance" && <FinanceAdmin />}
+        {tab === "audit" && <AuditAdmin />}
       </ScrollView>
     </View>
   );
@@ -272,16 +275,126 @@ function CouponsAdmin() {
 function UsersAdmin() {
   const { colors } = useTheme();
   const [rows, setRows] = useState<any[]>([]);
-  useFocusEffect(useCallback(() => { api.get("/admin/users").then((r) => setRows(r.data)); }, []));
+  const [editing, setEditing] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const roles = ["CUSTOMER", "TECHNICIAN", "VENDOR", "PROVIDER", "SUPERVISOR", "OPERATIONS", "SUPPORT", "FINANCE", "STAFF", "ADMIN", "OWNER"];
+  const load = useCallback(() => api.get("/admin/users").then((r) => setRows(r.data)), []);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
+  const changeRole = async (uid: string, role: string) => {
+    setBusy(true); setErr(null);
+    try { await api.patch(`/admin/users/${uid}/role`, { role }); setEditing(null); await load(); }
+    catch (e: any) { setErr(errMsg(e)); }
+    finally { setBusy(false); }
+  };
   return (
     <>
+      {err && <Text style={{ color: colors.error }}>{err}</Text>}
       {rows.map((u) => (
         <View key={u.id} style={{ padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border }}>
-          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-            <Text style={{ color: colors.onSurface, fontWeight: "700" }}>{u.name || u.username}</Text>
-            <Text style={{ color: colors.brandPrimary, fontWeight: "600", fontSize: 12 }}>{u.role}</Text>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: colors.onSurface, fontWeight: "700" }}>{u.name || u.username}</Text>
+              <Text style={{ color: colors.muted, fontSize: 12 }}>{u.mobile} · {u.email || "no email"}</Text>
+            </View>
+            <Pressable onPress={() => setEditing(editing === u.id ? null : u.id)} testID={`user-role-${u.username}`} style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.brandPrimary }}>
+              <Text style={{ color: colors.brandPrimary, fontWeight: "700", fontSize: 12 }}>{u.role} ▾</Text>
+            </Pressable>
           </View>
-          <Text style={{ color: colors.muted, fontSize: 12 }}>{u.mobile} · {u.email || "no email"}</Text>
+          {editing === u.id && (
+            <View style={{ marginTop: spacing.sm, flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+              {roles.map((r) => (
+                <Pressable key={r} disabled={busy} onPress={() => changeRole(u.id, r)} testID={`user-role-set-${u.username}-${r}`} style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.pill, borderWidth: 1, borderColor: u.role === r ? colors.brandPrimary : colors.border, backgroundColor: u.role === r ? colors.brandSecondary : "transparent" }}>
+                  <Text style={{ color: u.role === r ? colors.onBrandSecondary : colors.onSurface, fontSize: 11, fontWeight: "600" }}>{r}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+        </View>
+      ))}
+    </>
+  );
+}
+
+function SupportAdmin() {
+  const { colors } = useTheme();
+  const [rows, setRows] = useState<any[]>([]);
+  useFocusEffect(useCallback(() => { api.get("/tickets").then((r) => setRows(r.data)); }, []));
+  const setStatus = async (tid: string, status: string) => {
+    await api.patch(`/tickets/${tid}`, { status });
+    setRows((await api.get("/tickets")).data);
+  };
+  if (rows.length === 0) return <Text style={{ color: colors.muted, textAlign: "center", marginTop: spacing.lg }}>No support tickets yet.</Text>;
+  return (
+    <>
+      {rows.map((t) => (
+        <View key={t.id} style={{ padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+            <Text style={{ color: colors.onSurface, fontWeight: "700", flex: 1 }} numberOfLines={1}>{t.subject}</Text>
+            <StatusPill status={t.status} />
+          </View>
+          <Text style={{ color: colors.muted, fontSize: 12, marginTop: 4 }}>{t.customer_name} · {t.priority}</Text>
+          <Text style={{ color: colors.onSurfaceSecondary, marginTop: 6 }} numberOfLines={3}>{t.description}</Text>
+          <View style={{ flexDirection: "row", gap: 6, marginTop: spacing.sm, flexWrap: "wrap" }}>
+            {["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED", "CLOSED"].map((s) => (
+              <Pressable key={s} onPress={() => setStatus(t.id, s)} testID={`ticket-${t.id.slice(0,8)}-${s}`} style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: radius.pill, borderWidth: 1, borderColor: t.status === s ? colors.brandPrimary : colors.border, backgroundColor: t.status === s ? colors.brandSecondary : "transparent" }}>
+                <Text style={{ color: t.status === s ? colors.onBrandSecondary : colors.muted, fontSize: 11, fontWeight: "600" }}>{s.replace(/_/g, " ")}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      ))}
+    </>
+  );
+}
+
+function FinanceAdmin() {
+  const { colors } = useTheme();
+  const [sum, setSum] = useState<any>(null);
+  const [rows, setRows] = useState<any[]>([]);
+  useFocusEffect(useCallback(() => {
+    api.get("/finance/summary").then((r) => setSum(r.data));
+    api.get("/finance/ledger").then((r) => setRows(r.data));
+  }, []));
+  if (!sum) return <ActivityIndicator color={colors.brandPrimary} />;
+  return (
+    <>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.md }}>
+        <Kpi label="Total Revenue" value={`₹${sum.revenue_paid}`} />
+        <Kpi label="Cash" value={`₹${sum.cash_paid}`} />
+        <Kpi label="UPI" value={`₹${sum.upi_paid}`} />
+        <Kpi label="Awaiting Verify" value={`₹${sum.awaiting_verification}`} tint="#FFF4E5" />
+        <Kpi label="Pending" value={`₹${sum.pending}`} />
+      </View>
+      <Text style={{ color: colors.onSurface, fontWeight: "700", fontSize: 16, marginTop: spacing.sm }}>Ledger</Text>
+      {rows.slice(0, 40).map((r) => (
+        <View key={r.booking_id} style={{ padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+            <Text style={{ color: colors.onSurface, fontWeight: "700" }}>{r.customer_name || "—"}</Text>
+            <Text style={{ color: colors.brandPrimary, fontWeight: "800" }}>₹{r.total}</Text>
+          </View>
+          <Text style={{ color: colors.muted, fontSize: 12, marginTop: 4 }}>{r.payment_method} · {r.payment_status} · {r.status}</Text>
+          {r.upi_txn_ref && <Text style={{ color: colors.onSurfaceSecondary, fontSize: 12 }}>UPI: {r.upi_txn_ref}</Text>}
+        </View>
+      ))}
+    </>
+  );
+}
+
+function AuditAdmin() {
+  const { colors } = useTheme();
+  const [rows, setRows] = useState<any[]>([]);
+  useFocusEffect(useCallback(() => { api.get("/admin/audit").then((r) => setRows(r.data)); }, []));
+  if (rows.length === 0) return <Text style={{ color: colors.muted, textAlign: "center", marginTop: spacing.lg }}>No audit records yet.</Text>;
+  return (
+    <>
+      {rows.map((a) => (
+        <View key={a.id} style={{ padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+            <Text style={{ color: colors.onSurface, fontWeight: "700" }}>{a.action}</Text>
+            <Text style={{ color: colors.muted, fontSize: 11 }}>{new Date(a.timestamp).toLocaleString()}</Text>
+          </View>
+          <Text style={{ color: colors.muted, fontSize: 12, marginTop: 4 }}>{a.actor_role} · {a.entity_type}/{a.entity_id.slice(0, 8)}</Text>
         </View>
       ))}
     </>
