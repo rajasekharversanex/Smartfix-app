@@ -587,9 +587,15 @@ async def list_addresses(u=Depends(current_user)):
 
 @api.post("/addresses")
 async def create_address(x: AddressIn, u=Depends(current_user)):
-    if x.is_default:
+    # If this is the user's very first address, force it to be the default so that
+    # the booking flow can auto-select it without any extra UX step.
+    existing = await addresses_c.count_documents({"user_id": u["id"]})
+    is_default = x.is_default or existing == 0
+    if is_default:
         await addresses_c.update_many({"user_id": u["id"]}, {"$set": {"is_default": False}})
-    doc = {"id": uid(), "user_id": u["id"], **x.dict(), "created_at": now_utc()}
+    data = x.dict()
+    data["is_default"] = is_default
+    doc = {"id": uid(), "user_id": u["id"], **data, "created_at": now_utc()}
     await addresses_c.insert_one(doc)
     doc.pop("_id", None)
     return doc

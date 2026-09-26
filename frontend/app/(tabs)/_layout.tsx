@@ -19,10 +19,10 @@ export default function TabsLayout() {
         tabBarItemStyle: { alignSelf: "center" },
       }}
     >
-      <Tabs.Screen name="home" options={{ title: "Home", tabBarIcon: ({ color, size }) => <Icon name="home-outline" size={size} color={color} /> }} />
-      <Tabs.Screen name="bookings" options={{ title: "Bookings", tabBarIcon: ({ color, size }) => <Icon name="clipboard-outline" size={size} color={color} /> }} />
-      <Tabs.Screen name="offers" options={{ title: "Offers", tabBarIcon: ({ color, size }) => <Icon name="pricetag-outline" size={size} color={color} /> }} />
-      <Tabs.Screen name="profile" options={{ title: "Profile", tabBarIcon: ({ color, size }) => <Icon name="person-outline" size={size} color={color} /> }} />
+      <Tabs.Screen name="home" options={{ title: "Home", tabBarButtonTestID: "tab-home", tabBarIcon: ({ color, size }) => <Icon name="home-outline" size={size} color={color} /> }} />
+      <Tabs.Screen name="bookings" options={{ title: "Bookings", tabBarButtonTestID: "tab-bookings", tabBarIcon: ({ color, size }) => <Icon name="clipboard-outline" size={size} color={color} /> }} />
+      <Tabs.Screen name="offers" options={{ title: "Offers", tabBarButtonTestID: "tab-offers", tabBarIcon: ({ color, size }) => <Icon name="pricetag-outline" size={size} color={color} /> }} />
+      <Tabs.Screen name="profile" options={{ title: "Profile", tabBarButtonTestID: "tab-profile", tabBarIcon: ({ color, size }) => <Icon name="person-outline" size={size} color={color} /> }} />
     </Tabs>
   );
 }

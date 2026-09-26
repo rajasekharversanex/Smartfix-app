@@ -7,6 +7,7 @@ import Icon from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { useTheme, spacing, radius } from "@/src/theme";
+import { Logo } from "@/src/brand";
 
 export default function Home() {
   const { user } = useAuth();
@@ -34,9 +35,12 @@ export default function Home() {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.surface }}>
-      <View style={{ paddingTop: insets.top + spacing.md, paddingHorizontal: spacing.xl, paddingBottom: spacing.md, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.divider }}>
-        <Text style={{ color: colors.muted, fontSize: 13 }}>Namaste 🙏</Text>
-        <Text style={{ color: colors.onSurface, fontSize: 22, fontWeight: "800" }} testID="home-greeting">{user?.name || user?.username}</Text>
+      <View style={{ paddingTop: insets.top + spacing.md, paddingHorizontal: spacing.xl, paddingBottom: spacing.md, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.divider, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: colors.muted, fontSize: 13 }}>Namaste 🙏</Text>
+          <Text style={{ color: colors.onSurface, fontSize: 22, fontWeight: "800" }} testID="home-greeting">{user?.name || user?.username}</Text>
+        </View>
+        <Logo size="sm" />
       </View>
       <ScrollView
         contentContainerStyle={{ paddingBottom: spacing.xxxl }}

@@ -6,6 +6,7 @@ import { useAuth } from "@/src/auth";
 import { useTheme, spacing } from "@/src/theme";
 import { Button, Input } from "@/src/ui";
 import { errMsg } from "@/src/api";
+import { Logo } from "@/src/brand";
 
 export default function Register() {
   const { requestOtp, verifyOtp, complete } = useAuth();
@@ -63,6 +64,9 @@ export default function Register() {
           <Pressable onPress={() => router.back()} testID="register-back-button" style={{ paddingVertical: spacing.sm }}>
             <Text style={{ color: colors.brandPrimary, fontWeight: "600" }}>‹ Back</Text>
           </Pressable>
+          <View style={{ alignItems: "center", marginTop: spacing.sm, marginBottom: spacing.md }}>
+            <Logo size="lg" />
+          </View>
           <Text style={[styles.title, { color: colors.onSurface }]}>Create your account</Text>
           <Text style={{ color: colors.muted, marginBottom: spacing.xl }}>Step {step} of 3</Text>
 

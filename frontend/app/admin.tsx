@@ -6,6 +6,7 @@ import { api, errMsg } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { useTheme, spacing, radius } from "@/src/theme";
 import { Button, Input, StatusPill } from "@/src/ui";
+import { Logo } from "@/src/brand";
 
 type Tab = "overview" | "bookings" | "services" | "providers" | "coupons" | "users";
 
@@ -20,11 +21,13 @@ export default function Admin() {
   return (
     <View style={{ flex: 1, backgroundColor: colors.surface }}>
       <View style={{ paddingTop: insets.top + spacing.md, paddingHorizontal: spacing.xl, paddingBottom: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.divider }}>
-        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end" }}>
-          <View>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          <View style={{ flex: 1 }}>
             <Text style={{ color: colors.muted, fontSize: 13 }}>Control Center</Text>
-            <Text style={{ color: colors.onSurface, fontSize: 22, fontWeight: "800" }}>SmartFix Admin</Text>
-            <Text style={{ color: colors.muted, fontSize: 12 }}>{user?.name || user?.username} · {user?.role}</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: 2 }}>
+              <Logo size="sm" />
+            </View>
+            <Text style={{ color: colors.muted, fontSize: 12, marginTop: 2 }}>{user?.name || user?.username} · {user?.role}</Text>
           </View>
           <Pressable onPress={async () => { await logout(); router.replace("/login"); }} testID="admin-logout"><Text style={{ color: colors.brandPrimary, fontWeight: "600" }}>Logout</Text></Pressable>
         </View>

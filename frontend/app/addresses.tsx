@@ -12,7 +12,7 @@ export default function Addresses() {
   const router = useRouter();
   const [rows, setRows] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [f, setF] = useState({ label: "Home", line1: "", line2: "", city: "", state: "", pincode: "", landmark: "", is_default: true });
+  const [f, setF] = useState({ label: "Home", line1: "", line2: "", city: "", state: "", pincode: "", landmark: "", is_default: false });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 

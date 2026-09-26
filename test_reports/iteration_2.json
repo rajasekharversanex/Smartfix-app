@@ -1,0 +1,37 @@
+{
+  "summary": "SmartFix Services — retest of PRIMARY BUG FIX (address preselection on Confirm-Booking) and full audit. Backend: 35/35 pytest suite PASSED (unchanged from iter_1). Frontend E2E on mobile viewport 390x844: (1) PRIMARY BUG FIX VERIFIED — customer1/Pass@123 logged in, tapped 'AC General Service' → Book Now, Address section auto-shows saved 'Home · Flat 402, Sunrise Towers, Mumbai - 400001' with green DEFAULT badge and green (brandPrimary) selection border; the dashed '+ Add or manage addresses' pressable is rendered below the list; Confirm Booking created booking 563c32ae... and booking detail correctly shows 'Home · Flat 402, Sunrise Towers, Mumbai - 400001'. (2) useFocusEffect refresh VERIFIED — added a second 'Office' address via profile → My Addresses (no app restart), navigated back to Book flow, and both addresses now render (count 1→2), proving the fix uses useFocusEffect not useEffect. (3) Multi-address selection VERIFIED — with 2 addresses the newly-created default 'Office' is preselected (green border rgb(15,122,73)); tapping non-default 'Home' swaps the border colors (Home→green rgb(15,122,73), Office→gray rgb(228,231,229)) confirming visual state swap. (4) BRANDING VERIFIED — smartfix-logo.png renders on Login, Register, Forgot Password, Home header (top-right), Profile footer (all confirmed by DOM asset check + screenshots); no 'SF' text placeholder found; no layout overflow. Regression flows previously passing in iter_1 remain green (backend suite all green). Overall backend 100% (35/35), frontend critical bug fix 100%.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/forgot-password", "issue": "reset_token still returned in response body (dev). Strip before production."},
+      {"endpoint": "/api/auth/register/request-otp", "issue": "dev_otp still returned in response body (dev). Strip before production and wire real SMS provider."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(pre-prod only) Strip dev_otp and reset_token fields from API responses; wire real SMS provider."
+  ],
+  "critical_code_review_comments": [
+    "book/[id].tsx now correctly uses useFocusEffect(useCallback(load,[load])) — will refetch on every screen focus so newly-added addresses from /addresses appear without app restart.",
+    "Preselection logic prefers the previously-selected address (if still valid) → is_default → first address — robust to list re-orderings.",
+    "'DEFAULT' pill and dashed '+ Add or manage addresses' pressable render only when addresses.length>0; the empty '+ Add Address' placeholder renders only when length===0 — correct branching.",
+    "assets/brand/smartfix-logo.png (~720KB) is used via expo-image with contentFit='contain'; consider providing a smaller optimized variant (already have smartfix-logo.webp ~245KB) to reduce bundle size — non-blocking.",
+    "addresses.tsx form initial state has is_default:true which means every new address created from the form becomes the new default (backend unsets prior default). This is the observed behavior during testing; if product wants only the FIRST address to auto-default, change initial to false. Not a bug per current spec."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (35/35)", "frontend": "100% critical flows"},
+  "seed_data_creation": "Created a booking 563c32ae-1ab5-4691-a464-a1f28acee794 for customer1 and a second address 34052042... labeled 'Office' (Tower B, TechPark, Mumbai - 400002). These persist for future retesting.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Public URL: https://smartfix-pro-4.preview.emergentagent.com. Owner: owner/Owner@12345. Customer with default address: customer1/Pass@123 (now has 2 addresses: 'Office' is_default=true and 'Home' is_default=false due to iter_2 test). DEV OTP 123456. Backend tests /app/backend/tests/backend_test.py (35/35 in ~4s). Testids used on Book screen: book-add-address (empty state), book-addr-<id> (each address card), book-manage-addresses (dashed pressable), book-confirm-button.",
+  "rca_of_issue": "Original bug: Confirm-Booking screen always displayed '+ Add Address' empty placeholder even when customer had saved addresses. Root cause: book/[id].tsx used useEffect (loaded addresses once on mount) and did not preselect a default. Fix (already applied by main agent): switched to useFocusEffect so returning to the screen refetches; added preselection logic (previous → is_default → first); rendered a 'DEFAULT' pill and dashed '+ Add or manage addresses' CTA. Verified end-to-end on mobile web preview."
+}

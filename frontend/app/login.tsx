@@ -3,9 +3,10 @@ import { View, Text, StyleSheet, ScrollView, KeyboardAvoidingView, Platform, Pre
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Link, useRouter } from "expo-router";
 import { useAuth } from "@/src/auth";
-import { useTheme, spacing, radius } from "@/src/theme";
+import { useTheme, spacing } from "@/src/theme";
 import { Button, Input } from "@/src/ui";
 import { errMsg } from "@/src/api";
+import { Logo } from "@/src/brand";
 
 export default function LoginScreen() {
   const { login } = useAuth();
@@ -34,11 +35,8 @@ export default function LoginScreen() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={{ paddingTop: insets.top + 40, paddingHorizontal: spacing.xl, paddingBottom: spacing.xxl }}>
           <View style={styles.brandRow}>
-            <View style={[styles.logoBox, { backgroundColor: colors.brandPrimary }]}>
-              <Text style={{ color: colors.onBrandPrimary, fontSize: 22, fontWeight: "800" }}>SF</Text>
-            </View>
+            <Logo size="xl" />
           </View>
-          <Text style={[styles.title, { color: colors.onSurface }]}>SmartFix Service</Text>
           <Text style={[styles.sub, { color: colors.muted }]}>by Versanex India · Doorstep experts you can trust</Text>
 
           <View style={{ marginTop: spacing.xl }}>
@@ -80,8 +78,6 @@ export default function LoginScreen() {
 }
 
 const styles = StyleSheet.create({
-  brandRow: { alignItems: "center", marginBottom: spacing.lg },
-  logoBox: { width: 64, height: 64, borderRadius: radius.lg, alignItems: "center", justifyContent: "center" },
-  title: { fontSize: 28, fontWeight: "800", textAlign: "center" },
-  sub: { fontSize: 14, textAlign: "center", marginTop: 6 },
+  brandRow: { alignItems: "center", marginBottom: spacing.md },
+  sub: { fontSize: 14, textAlign: "center", marginTop: 4 },
 });

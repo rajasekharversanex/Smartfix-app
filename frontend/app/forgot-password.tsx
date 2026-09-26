@@ -6,6 +6,7 @@ import { useAuth } from "@/src/auth";
 import { useTheme, spacing } from "@/src/theme";
 import { Button, Input } from "@/src/ui";
 import { errMsg } from "@/src/api";
+import { Logo } from "@/src/brand";
 
 export default function Forgot() {
   const { forgot, reset } = useAuth();
@@ -50,6 +51,9 @@ export default function Forgot() {
           <Pressable onPress={() => router.back()} testID="forgot-back-button" style={{ paddingVertical: spacing.sm }}>
             <Text style={{ color: colors.brandPrimary, fontWeight: "600" }}>‹ Back</Text>
           </Pressable>
+          <View style={{ alignItems: "center", marginTop: spacing.sm, marginBottom: spacing.md }}>
+            <Logo size="lg" />
+          </View>
           <Text style={{ fontSize: 26, fontWeight: "800", color: colors.onSurface, marginTop: spacing.sm }}>Reset password</Text>
           <Text style={{ color: colors.muted, marginBottom: spacing.xl }}>Email recovery is preferred. Mobile OTP is a fallback.</Text>
 

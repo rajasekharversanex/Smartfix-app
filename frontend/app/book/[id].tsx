@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { View, Text, ScrollView, Pressable, ActivityIndicator } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { api, errMsg } from "@/src/api";
 import { useTheme, spacing, radius } from "@/src/theme";
 import { Button, Input, Card } from "@/src/ui";
@@ -24,11 +24,23 @@ export default function BookFlow() {
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [s, a] = await Promise.all([api.get(`/services/${id}`), api.get("/addresses")]);
-    setSvc(s.data); setAddresses(a.data);
-    if (a.data.length) setSelectedAddr(a.data[0].id);
+    try {
+      const [s, a] = await Promise.all([api.get(`/services/${id}`), api.get("/addresses")]);
+      setSvc(s.data);
+      setAddresses(a.data || []);
+      // Auto-select default; fall back to first; preserve user choice if still valid
+      setSelectedAddr((prev) => {
+        const list: any[] = a.data || [];
+        if (prev && list.some((x) => x.id === prev)) return prev;
+        const def = list.find((x) => x.is_default);
+        return def ? def.id : list[0]?.id || null;
+      });
+    } catch (e: any) {
+      setErr(errMsg(e));
+    }
   }, [id]);
-  useEffect(() => { load(); }, [load]);
+  // Refresh on focus so newly-added addresses are picked up when returning from /addresses
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const applyCoupon = async () => {
     setErr(null);
@@ -74,12 +86,26 @@ export default function BookFlow() {
           <Pressable onPress={() => router.push("/addresses")} testID="book-add-address" style={{ padding: spacing.lg, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, alignItems: "center" }}>
             <Text style={{ color: colors.brandPrimary, fontWeight: "700" }}>+ Add Address</Text>
           </Pressable>
-        ) : addresses.map((a) => (
-          <Pressable key={a.id} testID={`book-addr-${a.id}`} onPress={() => setSelectedAddr(a.id)} style={{ padding: spacing.md, borderRadius: radius.md, borderWidth: 2, borderColor: selectedAddr === a.id ? colors.brandPrimary : colors.border, backgroundColor: colors.surface }}>
-            <Text style={{ color: colors.onSurface, fontWeight: "700" }}>{a.label}</Text>
-            <Text style={{ color: colors.onSurfaceSecondary, marginTop: 2 }}>{a.line1}{a.line2 ? `, ${a.line2}` : ""}, {a.city} - {a.pincode}</Text>
-          </Pressable>
-        ))}
+        ) : (
+          <>
+            {addresses.map((a) => (
+              <Pressable key={a.id} testID={`book-addr-${a.id}`} onPress={() => setSelectedAddr(a.id)} style={{ padding: spacing.md, borderRadius: radius.md, borderWidth: 2, borderColor: selectedAddr === a.id ? colors.brandPrimary : colors.border, backgroundColor: colors.surface }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <Text style={{ color: colors.onSurface, fontWeight: "700" }}>{a.label}</Text>
+                  {a.is_default && (
+                    <View style={{ backgroundColor: colors.brandSecondary, paddingHorizontal: 8, paddingVertical: 2, borderRadius: radius.pill }}>
+                      <Text style={{ color: colors.onBrandSecondary, fontSize: 10, fontWeight: "700" }}>DEFAULT</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={{ color: colors.onSurfaceSecondary, marginTop: 2 }}>{a.line1}{a.line2 ? `, ${a.line2}` : ""}, {a.city} - {a.pincode}</Text>
+              </Pressable>
+            ))}
+            <Pressable onPress={() => router.push("/addresses")} testID="book-manage-addresses" style={{ padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderStyle: "dashed", borderColor: colors.brandPrimary, alignItems: "center" }}>
+              <Text style={{ color: colors.brandPrimary, fontWeight: "700" }}>+ Add or manage addresses</Text>
+            </Pressable>
+          </>
+        )}
 
         <Text style={{ color: colors.onSurface, fontWeight: "700", marginTop: spacing.sm }}>Time Slot</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.sm }}>

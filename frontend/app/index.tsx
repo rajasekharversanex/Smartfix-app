@@ -1,8 +1,8 @@
-import { useEffect } from "react";
-import { View, ActivityIndicator, StyleSheet } from "react-native";
+import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { Redirect } from "expo-router";
 import { useAuth } from "@/src/auth";
-import { useTheme } from "@/src/theme";
+import { useTheme, spacing } from "@/src/theme";
+import { Logo } from "@/src/brand";
 
 export default function Index() {
   const { user, loading } = useAuth();
@@ -11,7 +11,9 @@ export default function Index() {
   if (loading) {
     return (
       <View style={[styles.center, { backgroundColor: colors.surface }]}>
-        <ActivityIndicator color={colors.brandPrimary} size="large" />
+        <Logo size="xl" />
+        <Text style={{ color: colors.muted, marginTop: spacing.sm, fontSize: 12, letterSpacing: 0.5 }}>by Versanex India</Text>
+        <ActivityIndicator color={colors.brandPrimary} size="large" style={{ marginTop: spacing.xl }} />
       </View>
     );
   }

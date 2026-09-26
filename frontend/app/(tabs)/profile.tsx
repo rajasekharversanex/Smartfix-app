@@ -5,6 +5,7 @@ import Icon from "@react-native-vector-icons/ionicons";
 import { useAuth } from "@/src/auth";
 import { useTheme, spacing, radius } from "@/src/theme";
 import { Button } from "@/src/ui";
+import { Logo } from "@/src/brand";
 
 export default function Profile() {
   const { user, logout } = useAuth();
@@ -40,10 +41,13 @@ export default function Profile() {
         <Row icon="briefcase-outline" label="Become a Provider" onPress={() => router.push("/provider-apply")} testID="profile-provider-apply" />
         <Row icon="lock-closed-outline" label="Reset Password" onPress={() => router.push("/forgot-password")} testID="profile-reset-password" />
 
-        <View style={{ marginTop: spacing.xl }}>
+        <View style={{ marginTop: spacing.xl, alignItems: "center" }}>
           <Button label="Log Out" variant="ghost" onPress={async () => { await logout(); router.replace("/login"); }} testID="profile-logout-button" />
+          <View style={{ marginTop: spacing.xl, alignItems: "center" }}>
+            <Logo size="sm" />
+            <Text style={{ color: colors.muted, textAlign: "center", marginTop: 6, fontSize: 11, letterSpacing: 0.4 }}>by Versanex India</Text>
+          </View>
         </View>
-        <Text style={{ color: colors.muted, textAlign: "center", marginTop: spacing.xl, fontSize: 12 }}>SmartFix Service · by Versanex India</Text>
       </ScrollView>
     </View>
   );
