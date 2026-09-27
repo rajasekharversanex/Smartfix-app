@@ -32,7 +32,12 @@ def s():
 
 
 def _login(s, identifier, password):
-    r = s.post(f"{API}/auth/login", json={"identifier": identifier, "password": password})
+    for _ in range(4):
+        r = s.post(f"{API}/auth/login", json={"identifier": identifier, "password": password})
+        if r.status_code == 429:
+            time.sleep(20)
+            continue
+        break
     assert r.status_code == 200, f"login {identifier}: {r.status_code} {r.text}"
     return r.json()["access_token"]
 
@@ -310,7 +315,8 @@ class TestDataIsolation:
         mobile = f"+9199999{random.randint(10000, 99999)}"
         r = s.post(f"{API}/auth/register/request-otp", json={"mobile": mobile})
         assert r.status_code == 200, r.text
-        r = s.post(f"{API}/auth/register/verify-otp", json={"mobile": mobile, "otp": DEV_OTP})
+        otp = r.json().get("dev_otp") or DEV_OTP
+        r = s.post(f"{API}/auth/register/verify-otp", json={"mobile": mobile, "otp": otp})
         assert r.status_code == 200
         ft = r.json()["flow_token"]
         uname = f"iso{int(time.time())}{random.randint(100,999)}"

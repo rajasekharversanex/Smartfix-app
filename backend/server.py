@@ -1,10 +1,13 @@
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Query
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from pymongo.errors import DuplicateKeyError
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from typing import List, Optional, Annotated, Literal
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -23,6 +26,16 @@ JWT_AUDIENCE = os.environ.get("JWT_AUDIENCE", "smartfix-app")
 EMAIL_KEY = os.environ.get("EMERGENT_EMAIL_KEY", "")
 EMAIL_FROM_NAME = os.environ.get("EMAIL_FROM_NAME", "SmartFix Service")
 RESET_URL = os.environ.get("RESET_URL", "")
+# DEV_MODE gates dev-only response fields (dev_otp, reset_token).
+# MUST be "false" (or unset) in production so recovery secrets never leak
+# through the API and are delivered only via email/SMS.
+DEV_MODE = os.environ.get("DEV_MODE", "false").lower() == "true"
+# CORS origin regex — default (dev) allows the Emergent preview host + localhost.
+# In production, override to your explicit domain(s) via env.
+CORS_ORIGIN_REGEX = os.environ.get(
+    "CORS_ORIGIN_REGEX",
+    r"https://.*\.emergentagent\.com|http://localhost(:\d+)?",
+)
 
 import bcrypt, jwt
 
@@ -30,8 +43,28 @@ ALGORITHM = "HS256"
 JWT_DAYS = 7
 OTP_TTL = timedelta(minutes=10)
 RESET_TTL = timedelta(minutes=30)
-DEV_OTP = "123456"
 EMAIL_BASE_URL = "https://integrations.emergentagent.com"
+
+# Fail-fast if JWT_SECRET still contains a placeholder string. Prevents
+# accidentally shipping the development signing key to production.
+if any(bad in JWT_SECRET.lower() for bad in ("changeme", "change-in-prod", "placeholder")):
+    raise RuntimeError(
+        "JWT_SECRET looks like a placeholder — generate a fresh value with "
+        "`python -c 'import secrets;print(secrets.token_urlsafe(48))'` and set it "
+        "in Deployment → Secrets before starting the app."
+    )
+
+if DEV_MODE:
+    # Loud, unmissable banner so nobody deploys with the dev gate on and
+    # accidentally re-opens SEC-001 (recovery-secret disclosure).
+    logging.getLogger("smartfix").warning(
+        "\n"
+        "  ############################################################\n"
+        "  ##  DEV_MODE=true — DO NOT USE THIS BUILD FOR PRODUCTION  ##\n"
+        "  ##  Recovery tokens are exposed in API responses for      ##\n"
+        "  ##  testing. Set DEV_MODE=false in Deployment > Secrets.  ##\n"
+        "  ############################################################"
+    )
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -57,8 +90,49 @@ app = FastAPI(title="SmartFix API")
 api = APIRouter(prefix="/api")
 BEARER = HTTPBearer(auto_error=False)
 
+# --- Rate limiter (sliding-window, in-memory, per client IP) ---
+# Behind Emergent/Kubernetes ingress the direct `request.client.host` is the
+# proxy edge, not the real user, which would collapse everyone into the same
+# bucket. TRUSTED_PROXY_HOPS controls how many trailing hops of
+# X-Forwarded-For we peel off — the value at that position is the actual
+# client IP because our proxy always appends and cannot be bypassed by an
+# attacker prepending fake hops. Default 1 = single reverse proxy in front.
+TRUSTED_PROXY_HOPS = max(1, int(os.environ.get("TRUSTED_PROXY_HOPS", "1")))
+
+
+def _client_ip_key(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        hops = [h.strip() for h in xff.split(",") if h.strip()]
+        # Real client IP = XFF[len - TRUSTED_PROXY_HOPS]. Our trusted proxies
+        # always APPEND the caller they saw to XFF, so the rightmost N values
+        # are proxy-authoritative and cannot be forged. With N=1 that's the
+        # rightmost value (the client as seen by our single proxy). Prepended
+        # attacker hops sit on the LEFT and are ignored.
+        idx = max(0, len(hops) - TRUSTED_PROXY_HOPS)
+        return hops[idx]
+    real = request.headers.get("x-real-ip")
+    return real.strip() if real else get_remote_address(request)
+
+
+limiter = Limiter(key_func=_client_ip_key, default_limits=[])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("smartfix")
+
+
+def gen_otp() -> str:
+    """Cryptographically-random 6-digit OTP (SEC-002 fix). Never a constant."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def dev_only_field(value):
+    """Return the value when running in DEV_MODE, else None.
+    Used to gate response fields (dev_otp / reset_token) that must not leak
+    in production. SEC-001 fix."""
+    return value if DEV_MODE else None
 
 
 # ---------- helpers ----------
@@ -96,8 +170,9 @@ def digest(v: str) -> str:
 
 
 def hash_password(p: str) -> str:
-    if len(p) < 6:
-        raise HTTPException(422, "Password must be at least 6 characters")
+    # Minimum length 8 (was 6): P3 hardening from security audit.
+    if len(p) < 8:
+        raise HTTPException(422, "Password must be at least 8 characters")
     return bcrypt.hashpw(p.encode(), bcrypt.gensalt(rounds=12)).decode()
 
 
@@ -135,6 +210,10 @@ async def current_user(c: Annotated[Optional[HTTPAuthorizationCredentials], Depe
         u = None
     if not u:
         raise HTTPException(401, "Invalid or expired token")
+    # SEC-003 fix: refuse tokens for accounts an admin has deactivated.
+    # `active` defaults to True for legacy accounts that predate the flag.
+    if u.get("active") is False:
+        raise HTTPException(401, "Account is deactivated")
     return u
 
 
@@ -247,7 +326,7 @@ class CompleteRegIn(BaseModel):
     flow_token: str
     name: str = Field(min_length=1, max_length=80)
     username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.]+$")
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=8)
     email: Optional[EmailStr] = None
 
 
@@ -262,7 +341,7 @@ class ForgotIn(BaseModel):
 
 class ResetIn(BaseModel):
     token: str
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=8)
     otp: Optional[str] = None
 
 
@@ -367,13 +446,21 @@ async def seed_defaults():
     # Seed owner if none exists
     if await users.count_documents({"role": "OWNER"}) == 0:
         owner_id = uid()
+        # Seed owner with a fresh random password so a leaked default cannot
+        # be reused against a real deployment. The password is printed to
+        # server logs only, so operators can retrieve it once from the log.
+        if DEV_MODE:
+            pw = "Owner@12345"
+        else:
+            pw = secrets.token_urlsafe(18)
         await users.insert_one({
             "id": owner_id, "name": "SmartFix Owner", "username": "owner",
             "email": "owner@smartfix.in", "mobile": "+919999900001",
-            "password_hash": hash_password("Owner@12345"),
-            "role": "OWNER", "created_at": now_utc(), "mobile_verified": True,
+            "password_hash": hash_password(pw),
+            "role": "OWNER", "active": True,
+            "created_at": now_utc(), "mobile_verified": True,
         })
-        logger.info("Seeded default owner: owner@smartfix.in / Owner@12345")
+        logger.info(f"Seeded default owner: owner@smartfix.in / {pw}")
 
     # Seed categories
     if await categories_c.count_documents({}) == 0:
@@ -435,30 +522,48 @@ async def root():
 
 
 @api.post("/auth/register/request-otp")
-async def register_request_otp(x: RequestOtpIn):
+@limiter.limit("5/minute")
+async def register_request_otp(request: Request, x: RequestOtpIn):
     mobile = norm_mobile(x.mobile)
+    # SEC-002 hardening (user enumeration): return the same generic response
+    # for "already registered" and "OTP sent" so an attacker cannot enumerate
+    # which mobile numbers own SmartFix accounts. The real OTP is only created
+    # for actually-unregistered numbers.
     if await users.find_one({"mobile": mobile}):
-        raise HTTPException(409, "Mobile already registered. Please login.")
-    code = DEV_OTP  # MOCK: replace with real SMS provider before launch
+        logger.info(f"[SEC] register_request_otp for already-registered {mobile}")
+        return {"message": "If the mobile is eligible, an OTP has been sent"}
+    code = gen_otp()  # SEC-002: random per request, no more hardcoded 123456
     await flows.replace_one(
         {"mobile": mobile},
         {"mobile": mobile, "otp_hash": digest(code), "expires_at": now_utc() + OTP_TTL, "verified": False},
         upsert=True,
     )
-    logger.info(f"[DEV] OTP for {mobile}: {code}")
-    return {"message": "OTP sent to your mobile", "dev_otp": code}
+    logger.info(f"[OTP] {mobile}: {code}")   # always logged for ops
+    resp = {"message": "If the mobile is eligible, an OTP has been sent"}
+    # SEC-001: OTP is never returned to clients in production.
+    if DEV_MODE:
+        resp["dev_otp"] = code
+    return resp
 
 
 @api.post("/auth/register/verify-otp")
-async def register_verify_otp(x: VerifyOtpIn):
+@limiter.limit("10/minute")
+async def register_verify_otp(request: Request, x: VerifyOtpIn):
     mobile = norm_mobile(x.mobile)
     f = await flows.find_one({"mobile": mobile})
     if not f or f["expires_at"] < now_utc() or not secrets.compare_digest(f.get("otp_hash", ""), digest(x.otp)):
+        # Count wrong attempts on the flow doc — 5 strikes and the flow is
+        # invalidated so an attacker can't brute-force the 6-digit space
+        # within the 10-minute OTP TTL.
+        if f:
+            await flows.update_one({"_id": f["_id"]}, {"$inc": {"attempts": 1}})
+            if f.get("attempts", 0) + 1 >= 5:
+                await flows.delete_one({"_id": f["_id"]})
         raise HTTPException(400, "Invalid or expired OTP")
     flow_token = secrets.token_urlsafe(32)
     await flows.update_one(
         {"_id": f["_id"]},
-        {"$set": {"verified": True, "flow_hash": digest(flow_token), "expires_at": now_utc() + timedelta(minutes=15)},
+        {"$set": {"verified": True, "flow_hash": digest(flow_token), "expires_at": now_utc() + timedelta(minutes=15), "attempts": 0},
          "$unset": {"otp_hash": ""}},
     )
     return {"flow_token": flow_token}
@@ -475,7 +580,8 @@ async def register_complete(x: CompleteRegIn):
         "name": x.name.strip(), "username": x.username.lower().strip(),
         "email": norm_email(str(x.email) if x.email else None),
         "password_hash": hash_password(x.password),
-        "role": Role.CUSTOMER.value, "created_at": now_utc(),
+        "role": Role.CUSTOMER.value, "active": True,
+        "created_at": now_utc(),
     }
     try:
         await users.insert_one(doc)
@@ -488,7 +594,8 @@ async def register_complete(x: CompleteRegIn):
 
 
 @api.post("/auth/login")
-async def login(x: LoginIn):
+@limiter.limit("10/minute")
+async def login(request: Request, x: LoginIn):
     i = norm_login(x.identifier)
     q = {"$or": [{"username": i.lower()}, {"email": norm_email(i)}]}
     if re.fullmatch(r"\+?\d{7,15}", i):
@@ -499,6 +606,9 @@ async def login(x: LoginIn):
     u = await users.find_one(q)
     if not u or not check_password(x.password, u["password_hash"]):
         raise HTTPException(401, "Invalid credentials")
+    # SEC-003: block deactivated accounts at login time.
+    if u.get("active") is False:
+        raise HTTPException(401, "Account is deactivated")
     return {
         "access_token": issue_token(u), "token_type": "bearer",
         "user": {"id": u["id"], "name": u.get("name"), "username": u["username"],
@@ -522,7 +632,8 @@ async def my_permissions(u=Depends(current_user)):
 
 
 @api.post("/auth/forgot-password")
-async def forgot(x: ForgotIn):
+@limiter.limit("5/minute")
+async def forgot(request: Request, x: ForgotIn):
     i = norm_login(x.identifier)
     q = {"$or": [{"email": norm_email(i)}, {"username": i.lower()}]}
     if re.fullmatch(r"\+?\d{7,15}", i):
@@ -531,28 +642,48 @@ async def forgot(x: ForgotIn):
         except HTTPException:
             pass
     u = await users.find_one(q)
+    # Always return the SAME generic message, regardless of whether the
+    # account exists or which recovery channel is configured. User
+    # enumeration hardening.
+    generic = {"message": "If the account exists, recovery instructions were sent"}
     if not u:
-        return {"message": "If the account exists, recovery instructions were sent"}
+        return generic
     raw = secrets.token_urlsafe(32)
     kind = "email" if u.get("email") else "mobile"
     doc = {"user_id": u["id"], "token_hash": digest(raw), "kind": kind, "expires_at": now_utc() + RESET_TTL}
+    otp_plain = None
     if kind == "mobile":
-        doc["otp_hash"] = digest(DEV_OTP)
+        otp_plain = gen_otp()
+        doc["otp_hash"] = digest(otp_plain)
     await resets.insert_one(doc)
     if kind == "email":
         link = f"{RESET_URL}?token={raw}"
         await send_reset_email(u["email"], u.get("name", ""), link)
-        return {"message": "Password reset link sent to email", "channel": "email", "reset_token": raw}
-    return {"message": "Recovery OTP sent to mobile", "channel": "mobile", "reset_token": raw, "dev_otp": DEV_OTP}
+    else:
+        logger.info(f"[OTP] password-reset {u['mobile']}: {otp_plain}")
+    # SEC-001 gate: recovery secrets ONLY leave the server when DEV_MODE=true
+    # (preview / automated testing). Production always returns just `generic`.
+    if DEV_MODE:
+        resp = {**generic, "channel": kind, "reset_token": raw}
+        if otp_plain is not None:
+            resp["dev_otp"] = otp_plain
+        return resp
+    return generic
 
 
 @api.post("/auth/reset-password")
-async def reset_password(x: ResetIn):
+@limiter.limit("10/minute")
+async def reset_password(request: Request, x: ResetIn):
     r = await resets.find_one({"token_hash": digest(x.token), "expires_at": {"$gt": now_utc()}})
     if not r:
         raise HTTPException(400, "Invalid or expired reset token")
     if r["kind"] == "mobile":
         if not x.otp or not secrets.compare_digest(digest(x.otp), r.get("otp_hash", "")):
+            # Same 5-strike lock-out as register/verify: brute-force the
+            # 6-digit OTP is only 100k tries, well within a 30-min TTL.
+            await resets.update_one({"_id": r["_id"]}, {"$inc": {"attempts": 1}})
+            if r.get("attempts", 0) + 1 >= 5:
+                await resets.delete_one({"_id": r["_id"]})
             raise HTTPException(400, "Invalid OTP")
     await users.update_one({"id": r["user_id"]}, {"$set": {"password_hash": hash_password(x.new_password)}})
     await resets.delete_one({"_id": r["_id"]})
@@ -669,10 +800,14 @@ async def create_address(x: AddressIn, u=Depends(current_user)):
 
 @api.patch("/addresses/{aid}")
 async def update_address(aid: str, x: AddressIn, u=Depends(current_user)):
+    # Owner-scope both the update and the follow-up read so a caller who
+    # guesses another user's address UUID cannot read or mutate it.
     if x.is_default:
         await addresses_c.update_many({"user_id": u["id"]}, {"$set": {"is_default": False}})
-    await addresses_c.update_one({"id": aid, "user_id": u["id"]}, {"$set": x.dict()})
-    return await addresses_c.find_one({"id": aid}, {"_id": 0})
+    r = await addresses_c.update_one({"id": aid, "user_id": u["id"]}, {"$set": x.dict()})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Address not found")
+    return await addresses_c.find_one({"id": aid, "user_id": u["id"]}, {"_id": 0})
 
 
 @api.delete("/addresses/{aid}")
@@ -1043,9 +1178,12 @@ async def create_quotation(x: QuotationIn, u=Depends(current_user)):
     parts_total, labour_total, subtotal, tax, total = _quotation_totals(
         x.items, x.labour_charge, x.tax_percent, x.discount)
     token = secrets.token_urlsafe(32)
+    # SEC-audit P3 hardening: store ONLY the SHA-256 hash of the token in the
+    # DB. The raw token is returned to the owning technician in memory here
+    # (and re-derivable on /send, which rotates it) but is never persisted.
     doc = {
         "id": uid(), "quotation_no": await _next_quotation_no(),
-        "token": token, "token_hash": digest(token),
+        "token_hash": digest(token),
         "booking_id": b["id"], "customer_id": b["customer_id"],
         "customer_name": b.get("customer_name") or "",
         "customer_phone": b.get("customer_mobile") or "",
@@ -1066,14 +1204,20 @@ async def create_quotation(x: QuotationIn, u=Depends(current_user)):
     await audit_log(u, "QUOTATION_CREATED", "quotation", doc["id"], None, {"total": total})
     await notify(b["customer_id"], "QUOTATION_CREATED", ["IN_APP"],
                  {"quotation_id": doc["id"], "total": total})
-    return _safe_quotation(doc)
+    # Return the raw token exactly once — the technician stores it in-app or
+    # copies the public URL now. No further endpoint reveals the raw token.
+    public_url = (os.environ.get("PUBLIC_URL") or "").rstrip("/") + f"/quote/{token}"
+    resp = _safe_quotation(doc)
+    resp["token"] = token
+    resp["public_url"] = public_url
+    return resp
 
 
-def _safe_quotation(doc: dict, include_token: bool = False) -> dict:
-    d = {k: v for k, v in doc.items() if k not in ("token_hash", "_id")}
-    if not include_token:
-        d.pop("token", None)
-    return d
+def _safe_quotation(doc: dict) -> dict:
+    """Strip persistence-only and secret fields before returning to any caller.
+    The raw `token` is *never* stored in DB (see create_quotation) so this
+    also masks any legacy row that might still carry it."""
+    return {k: v for k, v in doc.items() if k not in ("token_hash", "token", "_id")}
 
 
 @api.get("/quotations")
@@ -1105,8 +1249,10 @@ async def get_quotation(qid: str, u=Depends(current_user)):
         tech = await users.find_one({"id": q["technician_id"]}, {"_id": 0, "vendor_id": 1})
         if not tech or tech.get("vendor_id") != u["id"]:
             raise HTTPException(403, "Forbidden")
-    # Technicians who own it can see the raw token (so they can copy the link)
-    return _safe_quotation(q, include_token=u["role"] in FIELD_ROLES and q["technician_id"] == u["id"])
+    # No caller — not even the owning technician — receives the raw token via
+    # GET after creation. To resend, call POST /quotations/{id}/send which
+    # rotates the token.
+    return _safe_quotation(q)
 
 
 class QuotationSendIn(BaseModel):
@@ -1119,12 +1265,18 @@ async def send_quotation(qid: str, x: QuotationSendIn, u=Depends(current_user)):
     if not q: raise HTTPException(404, "Not found")
     if u["role"] not in FIELD_ROLES or q["technician_id"] != u["id"]:
         raise HTTPException(403, "Forbidden")
-    upd = {"status": "SENT" if q["status"] == "DRAFT" else q["status"], "sent_at": now_utc(), "updated_at": now_utc()}
+    # SEC-audit P3: rotate the public token on every send so a previously
+    # copied link stops working. Only the hash is stored — the raw token is
+    # returned to the technician in memory for this response.
+    new_token = secrets.token_urlsafe(32)
+    upd = {
+        "status": "SENT" if q["status"] == "DRAFT" else q["status"],
+        "sent_at": now_utc(), "updated_at": now_utc(),
+        "token_hash": digest(new_token),
+    }
     await quotations_c.update_one({"id": qid}, {"$set": upd})
     await audit_log(u, "QUOTATION_SENT", "quotation", qid, q["status"], upd["status"], {"channel": x.channel})
-    # Build the WhatsApp/SMS message + wa.me deep link. Real WhatsApp Business
-    # API sending is deferred; the technician can still tap the link.
-    public_url = (os.environ.get("PUBLIC_URL") or "").rstrip("/") + f"/quote/{q['token']}"
+    public_url = (os.environ.get("PUBLIC_URL") or "").rstrip("/") + f"/quote/{new_token}"
     message = (
         f"SmartFix Services\n"
         f"Hello {q.get('customer_name') or 'Customer'},\n"
@@ -1408,10 +1560,13 @@ async def my_notifications(u=Depends(current_user)):
 # =========================================================
 app.include_router(api)
 
+# SEC-audit hardening: pin CORS to configured origin(s) instead of "*".
+# The token is a bearer header (no cookies), so allow_credentials=False is
+# both safe and avoids the browser-side ignore-with-wildcard footgun.
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
+    allow_credentials=False,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_methods=["*"],
     allow_headers=["*"],
 )

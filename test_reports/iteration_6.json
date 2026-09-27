@@ -1,0 +1,42 @@
+{
+  "summary": "Round-2 security delta verification. 4 of 5 concerns PASS; 1 FAILS due to an off-by-one bug in server._client_ip_key. PASSING: (1) OTP brute-force lockout on /api/auth/register/verify-otp — 5 wrong OTPs correctly delete the flow doc, so the 6th call with the *correct* dev_otp returns 400 'Invalid or expired OTP'. (2) OTP brute-force lockout on /api/auth/reset-password — seeded a mobile-only user via direct MongoDB insert, drove /forgot-password (channel=mobile) to get reset_token+dev_otp, sent 5 wrong OTPs (each 400 'Invalid OTP'), then correct OTP returned 400 'Invalid or expired reset token' confirming the reset row was deleted at strike 5. (3) Rate limit on /api/auth/register/verify-otp — 429 fires by the 11th call within 60s (bucket size 10/min). (4) Rate limit on /api/auth/reset-password — 429 fires by the 11th call within 60s (bucket size 10/min). (5) Round-1 hardening suite: 20/20 PASS in isolation (pytest tests/test_security_hardening.py -q → `20 passed in 6.82s`). FAILING: TRUSTED_PROXY_HOPS behavior — with XFF='1.1.1.1, 2.2.2.2, 3.3.3.3' and TRUSTED_PROXY_HOPS=1, the review spec requires '2.2.2.2' but server returns '3.3.3.3' (the rightmost hop, which is what our own proxy appended — i.e. the trusted hop itself, not the client-as-seen-by-that-proxy). With TRUSTED_PROXY_HOPS=2 the spec requires '1.1.1.1' but server returns '2.2.2.2'. Root cause: server.py:97 uses `idx = max(0, len(hops) - TRUSTED_PROXY_HOPS)` which peels N-1 hops instead of N; correct expression is `idx = max(0, len(hops) - 1 - TRUSTED_PROXY_HOPS)`. Impact: with the default TRUSTED_PROXY_HOPS=1 in a 1-proxy topology, every request rate-limits against the *proxy's own IP* (single bucket for all users) — severely weakening rate limits and enabling denial-of-service on the shared bucket. Also means an attacker who sits behind our proxy shares one bucket with all legitimate users. Backend was restarted between test groups so per-IP sliding windows didn't cross-contaminate. All tests ran against http://localhost:8001 as instructed.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "server._client_ip_key (used by slowapi Limiter key_func for ALL rate-limited endpoints)",
+        "issue": "Off-by-one in the XFF hop selection. `idx = max(0, len(hops) - TRUSTED_PROXY_HOPS)` returns `hops[len-N]` (the N-th-from-right hop) but should return `hops[len-1-N]` (the N-th-from-right MINUS one, i.e. the client-as-seen-by-the-Nth-trusted-proxy). Concretely: XFF='1.1.1.1, 2.2.2.2, 3.3.3.3' with TRUSTED_PROXY_HOPS=1 currently returns '3.3.3.3' (that IS the trusted proxy itself, not the client), spec requires '2.2.2.2'. With TRUSTED_PROXY_HOPS=2 returns '2.2.2.2' but spec requires '1.1.1.1'. Fix: change server.py:97 to `idx = max(0, len(hops) - 1 - TRUSTED_PROXY_HOPS)`. Reference: /app/backend/server.py:91-100. Consequence in production: with default hops=1 and single reverse proxy, all clients collapse into ONE rate-limit bucket keyed on the proxy IP, defeating per-user rate limits everywhere (login, verify-otp, forgot-password, reset-password).",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_security_hardening_v2.py (round-2 deltas)",
+    "/app/backend/tests/test_security_hardening.py (round-1 regression 20/20)",
+    "/app/test_reports/pytest/pytest_hardening_r1_retest.xml",
+    "/app/test_reports/pytest/pytest_hardening_r2.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Fix off-by-one in /app/backend/server.py:97. Change `idx = max(0, len(hops) - TRUSTED_PROXY_HOPS)` to `idx = max(0, len(hops) - 1 - TRUSTED_PROXY_HOPS)`. After fix, the 3 currently-failing TestClientIpKey tests will pass and per-IP rate limits will actually work through the Emergent/K8s ingress.",
+    "Optional: also validate that each parsed hop is a valid IP (ipaddress.ip_address) and reject malformed entries so an attacker cannot inject junk to shift the index."
+  ],
+  "critical_code_review_comments": [
+    "Register/verify-otp lockout (server.py:534-547): correct — 5 wrong strikes delete the flow doc, 6th (even correct) returns 400 because outer find_one returns nothing.",
+    "Reset-password lockout (server.py:657-670): correct — same 5-strike pattern on the resets doc. After 5 wrong the row is deleted so subsequent (even correct-OTP) attempts fall through the outer 'Invalid or expired reset token' branch — verified end-to-end with a mobile-only seeded user.",
+    "Rate limits on verify-otp (10/min) and reset-password (10/min) fire deterministically at the 11th call when tested against localhost:8001. Note the reviewer's stated bucket is 10/min in code — spec says '11th response 429' which matches: 10 succeed (or return 400 depending on payload), 11th trips 429.",
+    "BUG — server.py:97 `_client_ip_key` off-by-one: `hops[len(hops) - TRUSTED_PROXY_HOPS]` returns the trusted proxy's own IP (rightmost when hops=1), not the client behind it. Standard XFF semantics: rightmost entry is the IP the immediate hop saw (== the previous hop's egress IP), so with N trusted proxies you peel N entries from the right and use the value at position len-1-N. Current code peels N-1. Impact is a de-facto disabling of per-IP rate limits in production. HIGH severity."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_security_hardening_v2.py (renamed old importlib.reload approach to monkeypatch.setattr(server, 'TRUSTED_PROXY_HOPS', N) per the review spec; added TRUSTED_PROXY_HOPS=2 case; skipped the 62-second sliding-window test that was not required by the review)"
+  ],
+  "success_rate": {
+    "backend": "9/10 (90%) — 4 OTP/rate-limit tests PASS + 20 round-1 regression PASS + 1 legitimate flow PASS + 1 no-XFF fallback PASS + 1 single-hop PASS; 3 XFF tests FAIL exposing the same off-by-one root cause",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "One mobile-only test user (username=lock<hex>, mobile=+91<random>) inserted directly into MongoDB by TestResetPasswordLockout to exercise the mobile-fallback reset path (forgot-password picks channel=mobile only if user has no email). Non-destructive.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "DEV_MODE=true → dev_otp/reset_token are returned in JSON. Backend was restarted between test groups because slowapi's in-memory sliding window is shared across tests running from the same host (localhost). If you run the full v2 file in one shot without restarts, TestLegitimateFlow will fail with 429 (bucket exhausted by preceding rate-limit tests) — not a product bug. The XFF off-by-one is a REAL security bug per the review spec; the fix is a one-liner at server.py:97. After main agent fixes it, re-run: `pytest tests/test_security_hardening_v2.py::TestClientIpKey -n 0 -v` — all 5 should pass. Note the reset-password lockout returns HTTP 400 'Invalid OTP' on wrong-OTP strikes 1-5 (not 'Invalid or expired reset token' as the review copy suggests) — that's actually the more precise message from the code path and does not affect the lockout behavior.",
+  "rca_of_issue": "server.py:97 uses `idx = max(0, len(hops) - TRUSTED_PROXY_HOPS)`. For XFF='a,b,c' (len=3) with TRUSTED_PROXY_HOPS=1 this yields idx=2 → returns 'c'. But 'c' is what OUR proxy appended — it's the connection IP the proxy saw, which is the previous hop (proxy chain's egress into us), NOT the actual client. Standard interpretation: XFF entries are populated left-to-right by each proxy appending the IP of ITS incoming connection. So with N fully-trusted proxies, the client IP is at position (len - 1 - N) from the left when reading right-to-left. The correct formula is `idx = max(0, len(hops) - 1 - TRUSTED_PROXY_HOPS)`. Reproduction: POST any rate-limited endpoint with `X-Forwarded-For: 1.1.1.1, 2.2.2.2, 3.3.3.3` and monkeypatch TRUSTED_PROXY_HOPS=1 → observe server returns '3.3.3.3' (unit test in TestClientIpKey.test_default_hops_1_returns_second_from_right). Mitigation: apply the one-line fix; consider validating each parsed IP with ipaddress.ip_address; document that TRUSTED_PROXY_HOPS must equal the exact number of trusted hops between the client and the app (never more, never less)."
+}

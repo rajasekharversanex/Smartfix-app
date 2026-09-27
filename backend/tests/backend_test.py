@@ -24,7 +24,12 @@ def s():
 
 @pytest.fixture(scope="session")
 def owner_token(s):
-    r = s.post(f"{API}/auth/login", json={"identifier": OWNER_ID, "password": OWNER_PW})
+    for _ in range(4):
+        r = s.post(f"{API}/auth/login", json={"identifier": OWNER_ID, "password": OWNER_PW})
+        if r.status_code == 429:
+            time.sleep(20)
+            continue
+        break
     assert r.status_code == 200, f"Owner login failed: {r.status_code} {r.text}"
     return r.json()["access_token"]
 
@@ -41,7 +46,9 @@ def customer(s):
     mobile = f"+9198{suffix[-8:]}"
     r = s.post(f"{API}/auth/register/request-otp", json={"mobile": mobile})
     assert r.status_code == 200, r.text
-    r = s.post(f"{API}/auth/register/verify-otp", json={"mobile": mobile, "otp": DEV_OTP})
+    otp = r.json().get("dev_otp")
+    assert otp, f"dev_otp missing (DEV_MODE off?): {r.text}"
+    r = s.post(f"{API}/auth/register/verify-otp", json={"mobile": mobile, "otp": otp})
     assert r.status_code == 200, r.text
     flow_token = r.json()["flow_token"]
     username = f"testcust{suffix}"
@@ -81,7 +88,9 @@ class TestAuth:
         mobile = f"+9198{random.randint(10000000, 99999999)}"
         r = s.post(f"{API}/auth/register/request-otp", json={"mobile": mobile})
         assert r.status_code == 200
-        assert r.json().get("dev_otp") == DEV_OTP
+        # SEC-002 fix: dev_otp is random 6-digit per call (no longer constant)
+        code = r.json().get("dev_otp")
+        assert code and len(code) == 6 and code.isdigit()
 
     def test_verify_otp_invalid(self, s):
         mobile = f"+9198{random.randint(10000000, 99999999)}"
@@ -90,8 +99,11 @@ class TestAuth:
         assert r.status_code == 400
 
     def test_duplicate_mobile_registration(self, s, customer):
+        # SEC-002: no longer returns 409 (user enumeration). Returns generic 200
+        # message and NO dev_otp payload.
         r = s.post(f"{API}/auth/register/request-otp", json={"mobile": customer["mobile"]})
-        assert r.status_code == 409
+        assert r.status_code == 200
+        assert "dev_otp" not in r.json()
 
     def test_forgot_password_email_owner(self, s):
         r = s.post(f"{API}/auth/forgot-password", json={"identifier": "owner@smartfix.in"})

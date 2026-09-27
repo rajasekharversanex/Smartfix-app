@@ -1,0 +1,45 @@
+{
+  "summary": "SmartFix security hardening pass — 119 tests total (99 legacy regression + 20 new security tests). Legacy suites (backend_test.py + test_roles_audit.py + test_smartfix_platform.py) all 99 pass after minimal test-side updates required by the SEC-002 behavior change: fixtures now read `dev_otp` from response instead of assuming hardcoded '123456'; deprecated 409-on-duplicate assertion replaced with 200+no-dev_otp; TestQuotations no longer expects GET /quotations/{id} to return raw token (P3: token returned only at CREATE + SEND). New /app/backend/tests/test_security_hardening.py — 20/20 pass — asserts every SEC-* fix and P3 hardening: SEC-001 DEV_MODE gate (reset_token/dev_otp only in DEV; production stripped per code inspection), SEC-002 random OTP + no user enumeration (already-registered returns generic 200 with NO dev_otp, two consecutive requests for same NEW mobile produce different OTPs, old OTP is invalidated), SEC-003 deactivation locks existing bearer token AND blocks fresh login with 401 'Account is deactivated' (reactivate restores), SEC-004 subprocess import with placeholder JWT_SECRET raises RuntimeError, rate limits (login >10/min, forgot-password >5/min, request-otp >5/min all 429), CORS pins to allow_origin_regex (evil origin NOT echoed, emergent-preview origin IS echoed), quotation token P3 (create returns raw token+public_url once, GET does not leak, DB row has only token_hash 64-char sha256, /send rotates so old token 404s and new token resolves), password min length 8 (register-complete + reset-password 7-char = 422, 8-char = 200). One CDN/infra observation: through the public preview URL, the ingress/CDN edge injects `access-control-allow-origin: *` on top of the backend response — backend middleware itself pins correctly (verified against localhost:8001), so this is an edge-layer concern, not a backend regression. Rate limits are enforced by slowapi via `get_remote_address` (request.client.host) which through Cloudflare varies per edge IP — verified against localhost:8001 where limits fire deterministically at the 11th/6th request.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "* (ingress layer)", "issue": "Public preview URL responds with `access-control-allow-origin: *` for ANY origin — the K8s ingress / Cloudflare adds a wildcard CORS header on top of the backend's origin-pinned response. Backend middleware is correct (verified via localhost:8001), but browsers hitting the public URL still see the wildcard. Consider disabling ingress CORS or configuring it to defer to upstream."},
+      {"endpoint": "slowapi", "issue": "Rate limiter uses `get_remote_address` which returns `request.client.host` — through Cloudflare each request may originate from a different edge IP, weakening real-world enforcement. Recommend switching key_func to a wrapper that prefers `X-Forwarded-For[0]` when present (and only trust it behind a known proxy)."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_roles_audit.py",
+    "/app/backend/tests/test_smartfix_platform.py",
+    "/app/backend/tests/test_security_hardening.py (NEW — 20 tests for SEC-001..SEC-004 + P3)",
+    "/app/test_reports/pytest/pytest_security.xml",
+    "/app/test_reports/pytest/pytest_all.xml"
+  ],
+  "action_items": [
+    "Fix ingress-layer CORS wildcard override so backend's allow_origin_regex is what the browser actually sees (see minor issue #1).",
+    "Harden slowapi key_func to use X-Forwarded-For (behind trusted proxy) so login/forgot/request-otp rate limits are per real client IP, not per CF edge (see minor issue #2).",
+    "Optional: legacy backend_test.py `test_login_wrong_password` and test_roles_audit.py `test_new_customer_sees_no_data` are flaky when the entire suite runs in parallel because they consume login/OTP budget from the same IP window — pass in isolation. Consider adding 429-retry helpers or serializing auth-heavy tests, or bumping the rate window for DEV_MODE."
+  ],
+  "critical_code_review_comments": [
+    "SEC-001 gate is correctly placed inside `if DEV_MODE:` blocks in both /forgot-password and /register/request-otp; unknown user still returns generic 200 without leak.",
+    "SEC-002 gen_otp() uses secrets.randbelow(1_000_000) — cryptographically random, 6-digit zero-padded; already-registered branch returns identical message with NO dev_otp field, defeating enumeration via response-shape diffing.",
+    "SEC-003 enforced in BOTH current_user() (rejects existing tokens whose user has active=False) and /auth/login (rejects fresh login) with matching 401 'Account is deactivated' text.",
+    "SEC-004 fail-fast at module import checks JWT_SECRET.lower() against ('changeme','change-in-prod','placeholder') — raises RuntimeError before AsyncIOMotorClient is constructed.",
+    "P3 quotation: raw token is generated once, only token_hash persisted (DB doc verified has no `token` key, only `token_hash` = 64-char sha256). /send generates a NEW random token, replaces token_hash — old raw token 404s. Verified end-to-end.",
+    "P3 password: Field(min_length=8) applied on CompleteRegIn.password, ResetIn.new_password, and hash_password — 7-char inputs correctly rejected with 422 at Pydantic layer.",
+    "Test-side migration was needed for OTP handling — SEC-002's per-request randomness is incompatible with previous hardcoded '123456' fixture; updated 4 fixtures to read `dev_otp` from response."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (fixture reads dev_otp from response; test_request_otp_dev_mode + test_duplicate_mobile_registration rewritten for SEC-002; owner_token retries on 429)",
+    "/app/backend/tests/test_roles_audit.py (isolation fixture reads dev_otp; _login retries on 429)",
+    "/app/backend/tests/test_smartfix_platform.py (tokens fixture retries on 429; test_owning_tech_gets_raw_token & test_reject_fresh_quote & test_send_returns_wa_link_when_phone updated for P3 rotation semantics)",
+    "/app/backend/tests/test_security_hardening.py (NEW — 20 security regression tests covering SEC-001..SEC-004 + rate limits + CORS pinning + quotation token P3 + password min length)"
+  ],
+  "success_rate": {"backend": "100% in isolated runs (117/117 legacy+security when suites run separately; 117/119 when full suite runs in parallel due to shared IP rate-limit budget — 2 flaky auth tests recover on retry)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "One additional quotation created for customer1's booking via TestQuotationTokenHardening (id in ctx.created); one throwaway user for TestPasswordMinLength happy-path. Both are non-destructive.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "DEV_MODE=true in preview so dev_otp/reset_token are exposed for tests. Legacy tests were updated to read dev_otp from the response (SEC-002 killed the hardcoded 123456). Rate limits (10/min login, 5/min forgot-pw & request-otp) fire deterministically against localhost:8001 but not through Cloudflare (per-edge IP variance). CORS pinning works at backend middleware layer (localhost) but the ingress/CDN adds a wildcard header on the public URL. JWT placeholder guard is at server.py:50-55. Quotation raw token now only appears in /api/quotations create-response and /api/quotations/{id}/send response — NOT in GET. Every /send rotates the token so any cached public_url stops working. Full suite run command: `pytest /app/backend/tests/ -n 2 --dist loadscope` — expect 117-119 pass with 0-2 flaky auth tests when re-running.",
+  "rca_of_issue": "N/A — no product bugs, only test-side migrations required by the security enforcement (test fixtures used the pre-SEC-002 hardcoded OTP `123456` and the pre-P3 assumption that GET /quotations/{id} returns raw token). Also documented two minor infra-layer observations (ingress CORS override + CF-edge-IP rate-limit variance) as improvement items for E1."
+}

@@ -1,0 +1,42 @@
+{
+  "summary": "Round-3 delta verification: all 3 P3 fixes VERIFIED and the 5 REGRESSION checkpoints all PASS. Details: (1) XFF revert — server.py:103-115 `_client_ip_key` returns `hops[len - TRUSTED_PROXY_HOPS]` = rightmost for N=1; all 5 TestClientIpKey unit tests pass in isolation (0.43s). This is the standard XFF interpretation and closes SEC-005 raised in iteration_6. (2) Address IDOR — PATCH /api/addresses/{A_B.id} with customer1's JWT returns 404 (not 200 with leaked doc); customer1's GET /api/addresses does NOT include A_B. (3) forgot-password enumeration — POST identifier=owner AND POST identifier=nobody@nowhere.example both return exactly `{\"message\": \"If the account exists, recovery instructions were sent\"}`; the unknown-account body has no `channel`, `reset_token`, or `dev_otp` keys; both `message` strings are byte-identical so an attacker cannot enumerate. Regression: owner/tech1/customer1 logins all return 200 with access_token; `active=True` on fresh registrations; customer1 booking flow works end-to-end (service catalog list → address selection → POST /api/bookings 200 → GET /api/bookings/{id} returns matching address_id); quotation happy path works (create → response has token+public_url; GET /api/quotations/{id} strips token; POST /send rotates token so old public_url 404s and new works). Suite runs: test_security_hardening.py 20/20 PASS in isolation (8.15s after 65s wait for slowapi buckets); test_security_hardening_v2.py 9/10 PASS with 1 skipped and 1 rate-limit-collision failure on TestLegitimateFlow (verify-otp 10/min bucket consumed by preceding TestVerifyOtpRateLimit); TestLegitimateFlow PASSES in isolation. This is the exact test-infra limitation flagged in the review request — not a product bug. New file /app/backend/tests/test_round3_deltas.py exercises the 3 P3 deltas + all regression checkpoints: 10/10 PASS in 5.52s. Notes for main agent: (a) `+919999900802` from the review spec is already registered in this preview; my test picks a random fresh mobile so it works idempotently. (b) customer1's seeded addresses currently both have is_default=false — I don't consider that a regression from the deltas (the 'DEFAULT' UI badge / auto-populate is best-effort in the current data; the booking POST still succeeds with any user-owned address). Flagging as a minor seed hygiene issue for main agent.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "seed data: customer1 addresses",
+        "issue": "Both seeded addresses for customer1 (Home and Office) have is_default=false in the DB. The review request assumed 'Home · DEFAULT' auto-populates. Booking POST still works with any owned address, so this is cosmetic — but the frontend badge/auto-select code will silently pick the first address instead of the intended default. Fix: seed script should set is_default=True on the Home address (or run `db.addresses.updateOne({label:'Home', user_id:<customer1.id>}, {$set:{is_default:true}})`)."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_round3_deltas.py (NEW: 10 tests covering round-3 deltas + regressions)",
+    "/app/backend/tests/test_security_hardening.py (round-1, 20/20 in isolation)",
+    "/app/backend/tests/test_security_hardening_v2.py (round-2, 9/10 in-suite due to shared bucket; 5/5 TestClientIpKey)",
+    "/app/test_reports/pytest/pytest_round3_deltas.xml",
+    "/app/test_reports/pytest/pytest_hardening_r1_round3.xml",
+    "/app/test_reports/pytest/pytest_hardening_r2_round3.xml"
+  ],
+  "action_items": [
+    "Optional: patch the customer1 address seed so `Home` is is_default=True (currently both are false). Cosmetic — does not affect any of the round-3 fixes.",
+    "Nothing else. All three round-3 security corrections are correctly implemented and the regression surface is clean."
+  ],
+  "critical_code_review_comments": [
+    "server.py:103-115 `_client_ip_key` — CORRECT. Rightmost XFF entry for N=1 is standard semantics (proxy-appended, forge-proof). Iteration_6 mistakenly asserted the opposite; that recommendation was rejected and reverted.",
+    "server.py:801-810 `update_address` — CORRECT. Owner-scoped update_one + matched_count==0 → 404, and the follow-up read is also owner-scoped. No IDOR leak in the error body.",
+    "server.py:634-671 `forgot` — CORRECT. Response `message` is the SAME generic string for both unknown-user and real-user paths; DEV_MODE only APPENDS `channel`, `reset_token`, and optionally `dev_otp`. The unknown branch returns bare `generic` so no metadata is emitted."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_round3_deltas.py (new regression harness for the 3 round-3 P3 deltas + seeded logins + booking flow + quotation flow)"
+  ],
+  "success_rate": {
+    "backend": "35/35 in isolation (100%) — 10/10 round3_deltas + 20/20 hardening_r1 + 5/5 TestClientIpKey + 1/1 TestLegitimateFlow. Combined runs of hardening_r2 show 9/10 due to shared 10/min verify-otp slowapi bucket across tests (documented flake, not a product bug).",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "TestAddressIdor registers a temporary customer B via the OTP flow (random mobile) and cleans up its address on teardown. TestActiveDefaultTrue registers a throwaway customer via the OTP flow (idempotent — new mobile per run). TestQuotationFlow creates a DRAFT quotation on customer1's first booking (not cleaned up, but harmless — tech1 owns it).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "DEV_MODE=true so request-otp/forgot-password expose dev_otp/reset_token. slowapi buckets (5/min for /forgot-password, 10/min for /verify-otp and /reset-password) are per-IP; my tests inject a unique X-Forwarded-For per request via `_fake_xff()` to isolate buckets. Run each hardening suite standalone (never together in one pytest invocation) and wait ~65s between big runs so the 5/min buckets slide off. The review spec's `+919999900802` mobile is already registered in this preview — use `_new_mobile()` or random UUID-derived mobile for fresh registrations. `active` field is True by default on registrations. TestClientIpKey now correctly asserts rightmost-for-N=1 semantics; do NOT revert to the second-from-right expectation (that was iteration_6's incorrect analysis).",
+  "rca_of_issue": "Not applicable — no bugs found in this iteration. All three P3 fixes verify cleanly and no regressions detected."
+}

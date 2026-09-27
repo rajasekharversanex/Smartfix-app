@@ -40,7 +40,13 @@ def s():
 def tokens(s):
     out = {}
     for key, (u, p) in SEEDED.items():
-        r = s.post(f"{API}/auth/login", json={"identifier": u, "password": p})
+        # Retry on 429 (rate-limit) — SEC hardening added 10/min /auth/login limit.
+        for attempt in range(4):
+            r = s.post(f"{API}/auth/login", json={"identifier": u, "password": p})
+            if r.status_code == 429:
+                time.sleep(20)
+                continue
+            break
         assert r.status_code == 200, f"login {u}: {r.status_code} {r.text}"
         out[key] = r.json()["access_token"]
     return out
@@ -149,16 +155,22 @@ class TestQuotations:
         assert "token_hash" not in q
 
     def test_owning_tech_gets_raw_token(self, s, tokens, quote_ctx):
-        qid = quote_ctx["quote"]["id"]
+        # SEC P3 hardening: raw token is returned ONCE at CREATE time only —
+        # GET /quotations/{id} no longer echoes it back. Verify create-response
+        # already contains a strong token + public_url.
+        q = quote_ctx["quote"]
+        assert "token" in q, "create response must contain raw token"
+        tok = q["token"]
+        assert len(tok) >= 32, f"token too short: {len(tok)}"
+        assert q.get("public_url") and "/quote/" in q["public_url"]
+        # GET after creation must NOT leak token / token_hash
+        qid = q["id"]
         r = s.get(f"{API}/quotations/{qid}", headers=H(tokens["tech1"]))
         assert r.status_code == 200
         body = r.json()
-        assert "token" in body, "owning tech should get raw token"
-        tok = body["token"]
-        # token_urlsafe(32) -> ~43 char base64 string
-        assert len(tok) >= 32, f"token too short: {len(tok)}"
+        assert "token" not in body, "GET /quotations/{id} must not leak raw token"
         assert "token_hash" not in body
-        # cache the token for later tests
+        # cache for downstream tests
         quote_ctx["quote"]["_raw_token"] = tok
 
     def test_other_users_do_not_see_token(self, s, tokens, quote_ctx):
@@ -191,11 +203,10 @@ class TestQuotations:
         assert r.status_code == 200, r.text
         body = r.json()
         assert "public_url" in body and "/quote/" in body["public_url"]
+        # SEC P3: send rotates the token — capture the fresh one so downstream
+        # public-view tests hit the current hash (old raw token now 404s).
+        quote_ctx["quote"]["_raw_token"] = body["public_url"].rsplit("/", 1)[-1]
         # customer1 was seeded with mobile +919999900002 → wa_link should be returned
-        # (only when customer_phone is set)
-        # Peek to see: some builds only include when phone exists
-        # We assert public_url definitely, and wa_link presence based on phone.
-        # customer_phone field on booking = customer_mobile — check server value:
         q = s.get(f"{API}/quotations/{qid}", headers=H(tokens["tech1"])).json()
         if q.get("customer_phone"):
             assert body.get("wa_link"), f"wa_link expected when phone set: {body}"
@@ -241,12 +252,16 @@ class TestQuotations:
         }
         r = s.post(f"{API}/quotations", json=payload, headers=H(tokens["tech1"]))
         assert r.status_code == 200, r.text
-        qid = r.json()["id"]
-        # get raw token
-        tok = s.get(f"{API}/quotations/{qid}", headers=H(tokens["tech1"])).json()["token"]
-        # send first
-        s.post(f"{API}/quotations/{qid}/send", json={"channel": "WHATSAPP"},
-               headers=H(tokens["tech1"]))
+        created = r.json()
+        qid = created["id"]
+        # SEC P3: raw token comes from create response only, not GET.
+        tok = created["token"]
+        # send rotates the token — capture the NEW one from send response
+        sr = s.post(f"{API}/quotations/{qid}/send", json={"channel": "WHATSAPP"},
+                    headers=H(tokens["tech1"]))
+        assert sr.status_code == 200
+        # extract new token from public_url
+        tok = sr.json()["public_url"].rsplit("/", 1)[-1]
         r = s.post(f"{API}/public/quotations/{tok}/respond",
                    json={"decision": "REJECT", "customer_notes": "too costly"})
         assert r.status_code == 200
@@ -374,8 +389,9 @@ class TestRoleMgmtAndAudit:
     def test_owner_can_change_role(self, s, tokens):
         # Register a throwaway user, promote to TECHNICIAN, then revert.
         mobile = f"+9199888{random.randint(10000, 99999)}"
-        s.post(f"{API}/auth/register/request-otp", json={"mobile": mobile})
-        r = s.post(f"{API}/auth/register/verify-otp", json={"mobile": mobile, "otp": "123456"})
+        r0 = s.post(f"{API}/auth/register/request-otp", json={"mobile": mobile})
+        otp = r0.json().get("dev_otp") or "123456"
+        r = s.post(f"{API}/auth/register/verify-otp", json={"mobile": mobile, "otp": otp})
         ft = r.json()["flow_token"]
         uname = f"rt{int(time.time())}{random.randint(100,999)}"
         r = s.post(f"{API}/auth/register/complete", json={
